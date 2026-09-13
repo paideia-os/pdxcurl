@@ -1,297 +1,1356 @@
-// src/main.pdx -- pdxcurl v1.2.0 STUB body + v1.1-B semantic-pipe
-//                  emission wire (originally landed at v1.1.0
-//                  under pdxcurl#21).
+// src/main.pdx -- pdxcurl v1.3.0 REAL M2/M3 body (Wave CC).
 //
-// v1.2.0 (Wave V drain) edits to this file are COMMENT + RODATA
-// only -- no register-plan / instruction changes to _start. The
-// STUB entry body still marshals + emits + refuses argv with
-// exit 2. The Wave V additions are:
-//   (a) A `curl_msg_dry_run_stub` diagnostic string reserved for
-//       the future --dry-run body (pdxcurl#3, blocked on
-//       pdxcurl#2 parser-body). Referenced by nothing at v1.2.0;
-//       lands so the parser landing is a call-site edit rather
-//       than a rodata edit here.
-//   (b) A honest-witness note (below) that the v1.1-B emission
-//       wire is what v1.2.0 ships for pdxcurl#10 (M3-003) -- the
-//       REAL per-request emit that fills every numeric field
-//       from the response still needs pdxcurl#5 (http_get) and
-//       pdxcurl#9 (audit_id source) to land upstream.
+// v1.3.0 lands the M2/M3 real bodies for:
+//   pdxcurl#4  M2-001 libpdx-url integration    (inline url_parse; libpdx-url
+//                                                 not yet in repo -- see
+//                                                 src/url_parse.pdx header)
+//   pdxcurl#5  M2-002 HTTP GET (no TLS)         (sys_socket + sys_connect +
+//                                                 sys_send + sys_recv)
+//   pdxcurl#6  M2-003 --output FILE             (sys_open O_CREAT|O_WRONLY|
+//                                                 O_TRUNC + sys_write)
+//   pdxcurl#7  M2-004 --data / POST body        (POST request line +
+//                                                 Content-Length header)
+//   pdxcurl#9  M3-002 libpdx-audit INTENT/RESULT (sys_semantic_send under
+//                                                 curl_schema_audit tag;
+//                                                 INTENT emitted before
+//                                                 sys_connect, RESULT
+//                                                 emitted after sys_recv
+//                                                 or from a failure branch)
 //
-// pdxcurl#10 (M3-003 semantic-pipe emit) honest witness
-// -----------------------------------------------------
-// The `HttpRequestRecord@0.1` marshal + emit block below IS the
-// v1.1-B wire. What it does not do at v1.2.0:
-//   - fill `method_and_scheme` from an argv-parsed URL (needs
-//     pdxcurl#2 argv parser body + pdxcurl#4 libpdx-url parse);
-//   - fill `status` / `body_bytes` / `header_count` /
-//     `redirect_count` from the response (needs pdxcurl#5
-//     http_get + pdxcurl#8 net_tls_wrap);
-//   - fill `result_code` from the branch outcome (currently
-//     hard-coded to RC_INTENT = 12) -- lands with pdxcurl#12
-//     M3-005 wire-in at each emit-site's error branch (rodata
-//     for the enum already landed at src/error_taxonomy.pdx in
-//     this drain);
-//   - emit the RESULT record after the response (paired-record
-//     discipline is pdxcurl#9 M3-002 audit-side).
-// The v1.2.0 emit is deliberately unchanged from v1.1.0 so
-// downstream consumers keep parsing HRR records against the
-// v1.1-B fingerprint. The real per-request emit lands as an
-// EDIT of this file once its four upstream dependencies clear.
+// The v1.1-B M3-003 HttpRequestRecord@0.1 pipe emit (schema 0x487474
+// 7052657101 = "HttpReq"+01) is preserved: still emitted at the END
+// of every completed request with the response numeric fields filled
+// in. Consumers of the pipe stream that were parsing v1.1-B records
+// keep parsing v1.3.0 records against the same schema tag; the shape
+// is unchanged, only the field VALUES become real.
 //
-// pdxcurl v1.2.0 also lands two rodata-only satellite modules
-// referenced by this file only through the manifest sources
-// list (no call-site here at v1.2.0):
-//   - src/error_taxonomy.pdx   (module ErrorTaxonomy)   -- pdxcurl#12
-//   - src/argv_surface.pdx     (module ArgvSurface)     -- pdxcurl#2
+// What v1.3.0 does NOT land
+// -------------------------
+//   - TLS / https:// (pdxcurl#8, M3-001) -- https URL is parsed but
+//     the request path jumps to curl_tls_not_yet (exit EXIT_TLS_HAND
+//     SHAKE_FAILED=9). Blocks on paideia-os libpdx-net M5.
+//   - DNS-name hosts. Only IPv4 dotted-decimal (a.b.c.d) accepted;
+//     a non-numeric host jumps to curl_url_bad (exit EXIT_ARGV_USAGE
+//     =2). Blocks on a user-space DNS syscall landing.
+//   - -H / --header (pdxcurl#11, M3-004 --audit-only) -- accepted at
+//     the argv scanner but the header-list is not marshalled into the
+//     request assembly at v1.3.0.
+//   - -X / --method with GET/POST alternatives (HEAD/PUT/DELETE)
+//     (pdxcurl scope: v1.3.0 handles POST when --data present, GET
+//     otherwise; -X override to force PUT/DELETE deferred).
+//   - --dry-run (pdxcurl#3) and --audit-only (pdxcurl#11) -- flag
+//     literals in src/argv_surface.pdx honoured by the scanner but
+//     the flag-body branches are STUB (write reserved diagnostic +
+//     exit 0). The two RC_DRY_RUN/RC_AUDIT_ONLY result-codes emit
+//     an audit-INTENT record but no network I/O.
+//   - Response body > 4096 bytes. Single sys_recv into a 4 KiB
+//     scratch; a larger body is truncated to 4 KiB and the request
+//     succeeds with body_bytes = 4096 in the RESULT record. A
+//     recv-loop landing tracked as a follow-up.
+//   - Chunked-encoding (Transfer-Encoding: chunked). Parser scans
+//     the first "\r\n\r\n" and copies everything after to the output
+//     fd verbatim; if the server responded with chunked framing,
+//     the output includes the chunk-size lines. HTTP/1.0 in the
+//     request-line suppresses this in most stacks.
 //
-// Original v1.1.0 header follows.
-// ------------------------------------------------------------------
-// src/main.pdx -- pdxcurl v1.1.0 STUB body + v1.1-B semantic-pipe
-//                  emission wire (pdxcurl#21).
+// CLI surface honoured at v1.3.0
+// ------------------------------
+//   pdxcurl [ -o | --output FILE ] [ -d | --data BODY ] <url>
 //
-// pdxcurl: capability-native improved-curl CLI (design/networking/
-// pdxcurl-design.md in paideia-os). Ring-3 ELF entry point (`_start`),
-// argv-wired per the frozen execve ABI (design/user/execve-abi.md):
-//   rdi = argc, rsi = argv (VA of a char*[]), rdx = envp (unused),
-//   rsp % 16 == 0 at entry.
+// Positional <url> is REQUIRED; if absent (or if the scanner
+// completes without capturing one), exit EXIT_ARGV_USAGE (=2).
 //
-// v1.1.0 scope
+// Register plan (across the four phases of _start)
+// ------------------------------------------------
+// Phase A (argv scan):   r12 = argc, r13 = argv base, rbx = i (cursor),
+//                        r14 = current argv[i] ptr, r15 = scratch
+// Phase B (url parse):   r12/r13 unused (state persists in .bss slots).
+//                        r15 = byte cursor into argv[url]. rax = per-
+//                        byte scratch. r8 = per-field octet accumulator.
+//                        rdx = folded ip u32. r11 = dot count.
+// Phase C (request):     rbp = ip u32 (from curl_url_ip), rbx = port,
+//                        r14 = method (0=GET, 1=POST), r15 = socket fd,
+//                        r12 = req_len (accumulator into curl_req_buf)
+// Phase D (response):    r12 = bytes recv'd (from sys_recv return),
+//                        r13 = HTTP status (parsed from response),
+//                        r15 = output fd (socket-fd flipped to file-fd
+//                        after sys_open when --output present; else 1)
+//
+// SC+ IDs used
 // ------------
-// Real-body wiring (M1-002 argv scanner, M2-001 libpdx-url integration,
-// M2-002 http_get, M3-001 net_tls_wrap, M3-002 libpdx-audit INTENT/
-// RESULT pair, M3-003 HttpRequestRecord@0.1 emit, M3-004 --audit-only,
-// M3-005 error taxonomy) is out of scope at v1.1.0 -- tracked as
-// pdxcurl#2..#12 and each blocked on its own libpdx-net / libpdx-url /
-// libpdx-audit / pdxtrust satellite landing. v1.1.0 lands:
-//   (a) STUB argv-refusing entry with the design-doc-final exit-code
-//       taxonomy (§7): exit 2 on any argv usage error, no network I/O.
-//   (b) v1.1-B semantic-pipe emission wire (pdxcurl#21): a stub
-//       HttpRequestRecord@0.1 marshalled into a 48-byte .bss buffer
-//       and emitted via sys_semantic_send (SC+ ID 115, paideia-os
-//       handler landed at R107-M0-001 #2350) so a downstream consumer
-//       can key off the schema tag before the real request path
-//       lands. `result_code = INTENT` at v1.1.0 (see §7 taxonomy);
-//       the record's other numeric fields are zero and become real
-//       when the M3-003 emit fills them from the response.
-//   (c) PDX_TOOL_NAME + PDX_TOOL_VERSION externs (see src/tool_ident.
-//       pdx) so libpdx-argv 1.1.3+ can pull tool identity by UND
-//       reference at whatever future point the argv scanner lands.
-//
-// Emission ordering (v1.1-B honest scope): the semantic-pipe emit
-// runs BEFORE the argv refusal at v1.1.0. This is inverted from the
-// design-doc-final ordering (§4 pipeline: INTENT record before DNS,
-// RESULT record after response). v1.1.0's emission is a witness
-// that the SC+ ID 115 wire compiles + links + accepts the pdxcurl
-// schema tag -- it is not the real per-request INTENT emission that
-// M3-003 (pdxcurl#10) will land. Consumers reading the ring at
-// v1.1.0 will see one HttpRequestRecord@0.1 with `result_code =
-// INTENT` and every numeric field zero, which is honestly no more
-// meaningful than "pdxcurl ran once"; the shape of the record is
-// what v1.1-B ships and what future consumers can start parsing
-// against.
-//
-// SockSes / HttpRequest schema-tag namespace note
-// -----------------------------------------------
-// The pdxsock precedent (0x536F636B53657301 = "SockSes" + version
-// 0x01) chose an 8-byte ASCII-mnemonic + version tail. pdxcurl
-// follows suit: 0x4874747052657101 = "HttpReq" + version 0x01. Both
-// are grep-friendly and stable pre-paideia-os#2000 (schema registry).
-//
-// Record shape (48 bytes, @align(8), fits in the sysno-115 240-byte
-// per-slot cap):
-//   [ +0]  magic            [u8; 8] -- "PDXKCURL" ASCII, little-endian
-//                                      u64 0x4C5255434B584450. Grep-
-//                                      friendly self-identifier for
-//                                      the pdxcurl generic-tool
-//                                      record family. Consumers key
-//                                      off this before parsing.
-//   [ +8]  version          u32     -- HRR_VERSION = 1 (v0.1 schema).
-//   [+12]  flags            u32     -- reserved; zero at v1.1.0.
-//   [+16]  method_and_scheme u32    -- packed. Low byte = method
-//                                      enum (0=GET, 1=POST, 2=HEAD,
-//                                      3=PUT, 4=DELETE), next byte =
-//                                      scheme enum (0=http, 1=https),
-//                                      upper 16 bits reserved.
-//                                      At v1.1.0 = 0 (no argv parse).
-//   [+20]  status           u32     -- HTTP response status (0 at
-//                                      v1.1.0 -- no request sent).
-//   [+24]  body_bytes       u64     -- response body length (0 at
-//                                      v1.1.0).
-//   [+32]  redirect_count   u32     -- number of redirects followed
-//                                      (0 at v1.1.0).
-//   [+36]  header_count     u32     -- number of request headers
-//                                      (0 at v1.1.0; --header wire
-//                                      lands at M2-something).
-//   [+40]  result_code      u32     -- error taxonomy value per
-//                                      §7 of the design doc. At
-//                                      v1.1.0 always INTENT (=12);
-//                                      future landings emit OK / DNS_
-//                                      FAILED / CONN_REFUSED / TLS_
-//                                      KEY_MISMATCH / TIMEOUT / etc.
-//   [+44]  reserved         u32     -- zero at v1.1.0.
-//
-// Result-code numbering (matches §7 exit-code discipline where the
-// exit code is orthogonal to the code enum; the enum below is
-// arbitrary but stable):
-//   0=OK, 1=DNS_FAILED, 2=CONN_REFUSED, 3=TLS_KEY_MISMATCH,
-//   4=TLS_HANDSHAKE_FAILED, 5=HTTP_4XX, 6=HTTP_5XX, 7=TIMEOUT,
-//   8=TOO_MANY_REDIRECTS, 9=NO_PERMISSION, 10=DRY_RUN, 11=AUDIT_ONLY,
-//   12=INTENT.
-//
-// Schema tag: 0x4874747052657101 -- "HttpReq" + version 0x01. Grep-
-// searchable stable u64 fingerprint. Consumers key off the leading
-// PDXKCURL magic + version for layout selection; the schema tag names
-// the record family for the ring-index side (`sys_semantic_send`'s
-// first-argument slot).
+//     1 = sys_write         (fd, buf, count)
+//     2 = sys_open          (path_va, flags, mode)     [O_CREAT|O_WRONLY
+//                                                        |O_TRUNC = 0xC1]
+//     3 = sys_close         (fd)
+//    60 = sys_exit          (status)
+//    87 = sys_socket        (domain, type, proto)
+//    91 = sys_connect       (fd, remote_ip, remote_port)
+//    92 = sys_send          (fd, buf, len)
+//    93 = sys_recv          (fd, buf, len)
+//   115 = sys_semantic_send (schema, rec_ptr, rec_len)
 //
 // Encoder discipline (paideia-as 0.36+ pitfalls, per user memory)
 // ---------------------------------------------------------------
-//   - No `test rN, rN` anywhere; every zero-check is `cmp rN, 0`.
-//   - No 2-op `imul r, imm`.
-//   - Byte loads via `xor rax, rax; mov_b rax, [ptr]` per src/user/
-//     cat.pdx (paideia-as #1248: cmp al, imm8 emits with REX.W so
-//     upper bits of rax must be zero before the byte compare).
-//   - Every label prefixed `curl_` (reserved-word discipline).
-//   - Module name = PascalCase file basename (`Main` for `main.pdx`).
-//   - No multiline `pub let = "..."` string continuations.
+//   - No `test rN, rN`. Every zero-check is `cmp rN, 0`.
+//   - No 2-op `imul r, imm`. Decimal *10 is `shl rax, 3; add rax, r10;
+//     add rax, r10` (pdxsock precedent at pdxsock_port_loop).
+//   - Byte loads: `xor rax, rax; mov_b rax, [ptr]`.
+//   - Every label prefixed `curl_`.
+//   - Module name PascalCase basename (Main).
 //   - No `and r11, imm64`; every mask fits in imm32.
-//   - Fingerprint tag sizes: byte-array declarations write the NUL
-//     into the length AND the string body, but the sys_write length
-//     constant is the wire byte count (no NUL). Every literal below
-//     names both explicitly (`_len` sibling constant).
-//
-// SC+ IDs used (matches src/user/syscall_shim.pdx + design/user/
-// syscall-table.md through sysno 115):
-//   1   = sys_write         (fd, buf, count)         -> n | -errno
-//   60  = sys_exit          (status)                 -> never returns
-//   115 = sys_semantic_send (schema, rec_ptr, rec_len) -> 0 | -errno
+//   - Length constants for wire strings are separate `_len` u64 slots
+//     (excludes trailing NUL); source arrays include NUL.
+//   - No multi-line `pub let = "..."` continuations.
 
 module Main = structure {
 
-  // -----------------------------------------------------------------
-  // Diagnostic message. Fixed vocabulary at v1.1.0 (real usage string
-  // with grammar + flag hints lands with M1-002 / pdxcurl#2). Wire
-  // byte count in `_len` sibling excludes trailing NUL.
-  // -----------------------------------------------------------------
-  pub let curl_msg_stub         : [u8; 38] = "pdxcurl: v1.2.0 stub, no request run\n\0"
-  pub let curl_msg_stub_len     : u64 = 37
+  // ==================================================================
+  // Diagnostic strings (fd 2 targets; wire byte counts exclude NUL)
+  // ==================================================================
+  pub let curl_msg_usage             : [u8; 48] = "pdxcurl: usage: pdxcurl [-o F] [-d BODY] <url>\n\0"
+  pub let curl_msg_usage_len         : u64      = 47
 
-  // -----------------------------------------------------------------
-  // curl_msg_dry_run_stub -- reserved for the future --dry-run body
-  // (pdxcurl#3, M1-003). Blocked on pdxcurl#2 parser-body. Referenced
-  // by no _start path at v1.2.0; landed as rodata now so the parser
-  // wire-in is a single call-site edit rather than a rodata edit
-  // here. Emission contract: parser detects --dry-run, marshals the
-  // HttpRequestRecord as it would emit it (result_code = RC_DRY_RUN
-  // = 10 per src/error_taxonomy.pdx), writes this diagnostic to fd 2,
-  // then exits EXIT_OK (0). Wire byte count in `_len` excludes NUL.
-  // -----------------------------------------------------------------
-  pub let curl_msg_dry_run_stub     : [u8; 40] = "pdxcurl: --dry-run, no network I/O run\n\0"
-  pub let curl_msg_dry_run_stub_len : u64      = 39
+  pub let curl_msg_bad_url           : [u8; 33] = "pdxcurl: bad url (want http://)\n\0"
+  pub let curl_msg_bad_url_len       : u64      = 32
 
-  // -----------------------------------------------------------------
-  // v1.1-B semantic-pipe record buffer + supporting state (pdxcurl#21).
-  //
-  // curl_record_buf holds the marshalled HttpRequestRecord@0.1 (48
-  // bytes). @align(8) so every u64 store is naturally aligned.
-  // .bss-resident (uninit); every field is overwritten at emit time
-  // (v1.1.0's emit is a fixed pattern -- see comments in _start).
-  //
-  // curl_schema_http_req is the schema fingerprint the kernel stores
-  // verbatim into the ring slot's schema u64. Grep-searchable stable
-  // constant; ASCII-mnemonic "HttpReq" + version 0x01.
-  //
-  // curl_hrr_magic is the leading 8 ASCII bytes ("PDXKCURL", little-
-  // endian u64) the emit block writes at record[+0]. Documentation
-  // constant; the emit path uses a movabs to load the same value
-  // inline (avoids a second rip-relative fetch).
-  //
-  // curl_hrr_version_and_flags packs version:u32 in bits [0..31] and
-  // flags:u32 in bits [32..63] so one mov [rN + 8], rM store places
-  // both fields in one instruction (same trick pdxsock uses).
-  // -----------------------------------------------------------------
-  pub let mut curl_record_buf         : [u8; 48] = uninit @align(8)
-  pub let curl_schema_http_req        : u64      = 0x4874747052657101
-  pub let curl_hrr_magic              : u64      = 0x4C5255434B584450
-  pub let curl_hrr_version_and_flags  : u64      = 0x0000000000000001
+  pub let curl_msg_bad_ip            : [u8; 38] = "pdxcurl: bad host (want IPv4 dotted)\n\0"
+  pub let curl_msg_bad_ip_len        : u64      = 37
 
-  // -----------------------------------------------------------------
+  pub let curl_msg_tls_not_yet       : [u8; 39] = "pdxcurl: https:// not wired at v1.3.0\n\0"
+  pub let curl_msg_tls_not_yet_len   : u64      = 38
+
+  pub let curl_msg_socket_fail       : [u8; 24] = "pdxcurl: socket failed\n\0"
+  pub let curl_msg_socket_fail_len   : u64      = 23
+
+  pub let curl_msg_connect_fail      : [u8; 25] = "pdxcurl: connect failed\n\0"
+  pub let curl_msg_connect_fail_len  : u64      = 24
+
+  pub let curl_msg_send_fail         : [u8; 22] = "pdxcurl: send failed\n\0"
+  pub let curl_msg_send_fail_len     : u64      = 21
+
+  pub let curl_msg_recv_fail         : [u8; 22] = "pdxcurl: recv failed\n\0"
+  pub let curl_msg_recv_fail_len     : u64      = 21
+
+  pub let curl_msg_open_fail         : [u8; 27] = "pdxcurl: open output fail\n\0"
+  pub let curl_msg_open_fail_len     : u64      = 26
+
+  pub let curl_msg_bad_resp          : [u8; 34] = "pdxcurl: malformed HTTP response\n\0"
+  pub let curl_msg_bad_resp_len      : u64      = 33
+
+  pub let curl_msg_dry_run_stub      : [u8; 40] = "pdxcurl: --dry-run, no network I/O run\n\0"
+  pub let curl_msg_dry_run_stub_len  : u64      = 39
+
+  // ==================================================================
+  // Fixed request-line + header fragments (assembled into curl_req_buf)
+  // ==================================================================
+  pub let curl_frag_get              : [u8; 5]  = "GET \0"
+  pub let curl_frag_get_len          : u64      = 4
+  pub let curl_frag_post             : [u8; 6]  = "POST \0"
+  pub let curl_frag_post_len         : u64      = 5
+  pub let curl_frag_http10           : [u8; 12] = " HTTP/1.0\r\n\0"
+  pub let curl_frag_http10_len       : u64      = 11
+  pub let curl_frag_host             : [u8; 7]  = "Host: \0"
+  pub let curl_frag_host_len         : u64      = 6
+  pub let curl_frag_crlf             : [u8; 3]  = "\r\n\0"
+  pub let curl_frag_crlf_len         : u64      = 2
+  pub let curl_frag_clen             : [u8; 17] = "Content-Length: \0"
+  pub let curl_frag_clen_len         : u64      = 16
+
+  // ==================================================================
+  // .bss scratch buffers
+  // ==================================================================
+  //   curl_req_buf    -- outbound HTTP request assembly (2 KiB cap; path
+  //                       + host + method + headers + POST body).
+  //   curl_resp_buf   -- inbound HTTP response (4 KiB cap; single
+  //                       sys_recv, MVP -- see file header).
+  //   curl_clen_buf   -- decimal-encoded Content-Length ASCII (20 bytes:
+  //                       max u64 = 20 digits).
+  //   curl_argv_slots -- captured argv pointers from Phase A scan:
+  //                       [+0]  = url_ptr    (0 = unset)
+  //                       [+8]  = output_ptr (0 = stdout)
+  //                       [+16] = data_ptr   (0 = GET; nonzero = POST)
+  //                       [+24] = data_len   (u64; strlen at scan-time)
+  // ==================================================================
+  pub let mut curl_req_buf           : [u8; 2048] = uninit @align(8)
+  pub let mut curl_resp_buf          : [u8; 4096] = uninit @align(8)
+  pub let mut curl_clen_buf          : [u8; 24]   = uninit @align(8)
+  pub let mut curl_argv_slots        : [u8; 32]   = uninit @align(8)
+
+  // v1.1-B semantic-pipe record buffer + schema constants (pipe stream)
+  pub let mut curl_record_buf        : [u8; 48]   = uninit @align(8)
+  pub let curl_schema_http_req       : u64        = 0x4874747052657101
+  pub let curl_hrr_magic             : u64        = 0x4C5255434B584450
+
+  // ==================================================================
   // _start -- pdxcurl entry point. Never returns; every terminal path
   // ends in sys_exit.
   //
-  // Register plan (all callee-save-adjacent; leaf syscall-only body,
-  // no `call` cross-module, no push/pop -- rsp % 16 == 0 posture
-  // inherited from ELF process init):
-  //   rax = SYSCALL number + return
-  //   rdi/rsi/rdx = syscall args
-  //   r10 = record base pointer during marshal
-  //
-  // Exit statuses (v1.1.0 subset of §7 taxonomy):
-  //   2 = argv usage refusal (STUB path -- always at v1.1.0)
-  //
-  // Effects: {mem, sysreg} for scratch touches + every SYSCALL.
-  // Caps:    @{fs, sched, cap} -- fs for write, sched for exit,
-  //          cap for the sys_semantic_send emission (cap-ungated on
-  //          the kernel side per src/kernel/core/syscall/handlers/
-  //          sys_semantic_send.pdx at R107-M0-001 but declared for
-  //          shape).
-  // -----------------------------------------------------------------
+  // Effects: {mem, sysreg} for scratch + every SYSCALL.
+  // Caps:    @{fs, sched, cap}
+  // ==================================================================
   pub let _start : () -> () !{mem, sysreg} @{fs, sched, cap} =
     fn () -> unsafe {
       effects: {mem, sysreg},
       capabilities: {fs, sched, cap},
-      justification: "pdxcurl v1.1.0 STUB entry body + v1.1-B semantic-pipe emission wire (pdxcurl#21). Marshals a fixed HttpRequestRecord@0.1 (48 bytes) into curl_record_buf then emits it via sys_semantic_send (SC+ ID 115, R107-M0-001 #2350). At v1.1.0 every numeric field is zero except the leading `PDXKCURL` magic (8 ASCII bytes) + version = 1 + result_code = INTENT (12). This is a wire-shape witness -- consumers can start parsing HttpRequestRecord@0.1 records against the pdxcurl schema tag (0x4874747052657101, `HttpReq` + version 0x01) BEFORE the M3-003 (pdxcurl#10) real per-request emit lands. The emit runs BEFORE the argv refusal so an operator running `pdxcurl` at v1.1.0 sees one HRR record in the semantic-pipe ring per invocation, followed by the stub diagnostic on fd 2 and exit 2. Ordering is inverted from the design-doc §4 pipeline (INTENT-before-DNS then RESULT-after-response); v1.1.0's single record is not the real INTENT / RESULT pair, and the pair discipline lands with M3-002 (pdxcurl#9). sys_semantic_send's return (0 / -EFAULT / -EINVAL) is intentionally discarded -- v1.1.0 has no session to describe on failure, and a marshalling bug in this file (48-byte record within [1,240] cap, static rip-relative record_ptr never fails user_ptr_ok) is a compile-time question the linker gates. Encoder discipline (per user memory `pdx encoder pitfalls`): no `test rN, rN` (every zero-check is `cmp rN, 0`); no 2-op `imul r, imm`; byte loads use `xor rax, rax; mov_b rax, [ptr]`; module name matches file basename PascalCase (Main); every label prefixed `curl_`; no `and r11, imm64`; every fingerprint string carries a `_len` sibling constant naming the wire byte count (excludes trailing NUL). New encoder patterns exercised by v1.1-B: `mov [rip + label], reg` and `mov reg, [rip + label]` (rip-relative u64 stores/loads, proven at sys_semantic_send.pdx line 214); `mov r64, imm64` movabs for the 8-byte schema constant (proven at sys_semantic_send.pdx line 221 for errno constants). No decimal parse loop (v1.1.0 body has no argv parse); no *10 fold anywhere.",
+      justification: "pdxcurl v1.3.0 REAL M2/M3 body (Wave CC: pdxcurl#4, #5, #6, #7, #9). Retires the v1.2.0 argv-refusing STUB entry with a real HTTP-only driver that (a) walks argv[1..argc-1] recognising -o/--output FILE and -d/--data BODY plus a single positional <url> (argc cap 32, one --output slot, one --data slot); (b) parses the URL inline via curl_url_parse_inline (http:// prefix + IPv4 dotted-decimal host [a.b.c.d, 0..255 each] + optional :PORT slug + optional /path slug), writing scheme/ip/port/host_ptr/host_len/path_ptr/path_len into the .bss slots UrlParse.curl_url_* declared in src/url_parse.pdx; a https:// URL is parsed to scheme=1 but the request-path branch jumps to curl_tls_not_yet (exit EXIT_TLS_HANDSHAKE_FAILED=9) since M3-001/pdxcurl#8 is not yet wired; a non-numeric host jumps to curl_url_bad (exit EXIT_ARGV_USAGE=2) since a user-space DNS syscall is not yet available; (c) emits an audit-INTENT HttpRequestRecord@0.1 record (schema 0x0100747541727543 = 'CurAut'+01, result_code=RC_INTENT=12, method_and_scheme filled from r14+scheme, all other numeric fields zero) via sys_semantic_send BEFORE the sys_socket call, satisfying pdxcurl#9 M3-002's INTENT-before-DNS requirement; (d) calls sys_socket(AF_INET=2, SOCK_STREAM=1, 0) and sys_connect(fd, ip, port) with the parsed peer coords, jumping to curl_socket_fail / curl_connect_fail on any negative return; (e) assembles the outbound HTTP request into curl_req_buf via inline byte-copy loops -- request line ('GET '/'POST ' + path + ' HTTP/1.0\\r\\n'), Host header ('Host: ' + host + '\\r\\n'), optionally Content-Length header ('Content-Length: ' + decimal-ASCII(data_len) + '\\r\\n') and the final terminating '\\r\\n', then the POST body when curl_argv_slots+16 != 0 -- with req_len (r12) tracking the total wire byte count; (f) sys_send(fd, curl_req_buf, req_len); (g) single sys_recv into curl_resp_buf (4 KiB cap; a truncated read is an honest MVP scope call per file header), r12 = bytes_recv'd; (h) parses HTTP status from response bytes [9..12] as three ASCII decimal digits (rejects anything not matching HTTP/1.X SSS shape via curl_bad_resp exit=EXIT_ARGV_USAGE), r13 = status; (i) scans response for the '\\r\\n\\r\\n' end-of-headers sentinel and reads back body_start_offset + body_len; (j) if curl_argv_slots+8 != 0 sys_open(path, O_CREAT|O_WRONLY|O_TRUNC=0xC1, mode=0644) for the output file (fd -> r15) else r15 = 1 (stdout); (k) sys_write(r15, body_ptr, body_len) then sys_close(r15) if r15 != 1 and always sys_close(socket_fd); (l) emits an audit-RESULT HttpRequestRecord@0.1 record with method_and_scheme + status + body_bytes filled in and result_code = RC_OK / RC_HTTP_4XX (status >= 400 && < 500) / RC_HTTP_5XX (status >= 500 && < 600); (m) emits the pipe HttpRequestRecord@0.1 record under schema 'HttpReq'+01 unchanged from v1.1-B shape (all fields now real, not just leading magic); (n) sys_exit with the design-doc §7 exit code -- 0 on 2xx, EXIT_HTTP_4XX=4 on 4xx, EXIT_HTTP_5XX=5 on 5xx. Every syscall failure has its own diagnostic on fd 2 and a distinct nonzero exit status (EXIT_CONN_REFUSED=7 for sys_connect fail, EXIT_ARGV_USAGE=2 for scanner refusal, EXIT_TLS_HANDSHAKE_FAILED=9 for https not-wired, etc.) and an audit-RESULT record with the matching RC_* result_code. The two audit records travel under distinct schema tags from the pipe record so a consumer parsing sys_semantic_send's ring by schema can dispatch cleanly. Register discipline: r12/r13/rbx/rbp/r14/r15 all callee-save; roles switch across the four phases (see file-header §Register plan). r12 and r13 flip from argc/argv (Phase A) to req_len (Phase C) to bytes_recv / status (Phase D). rbx flips from scan-cursor (Phase A) to port (Phase C). rbp holds ip u32 across Phase C/D. All state carried in callee-save registers survives every SYSCALL by the amd64 fast-syscall convention (rcx and r11 are SYSCALL-clobbered per that convention; the byte-copy inner loops use them for cursor scratch only, never reading them after a syscall). sys_semantic_send returns are intentionally discarded (marshalling errors are compile-time gated -- 48-byte record within [1,240] cap, static rip-relative record_ptr never fails user_ptr_ok). Encoder discipline: no `test rN, rN` (every zero-check is `cmp rN, 0`); no 2-op `imul r, imm` (decimal *10 is `shl rax, 3; add rax, r10; add rax, r10` per pdxsock_port_loop; decimal encode for Content-Length divides by 10 via `mov r10, 10; xor rdx, rdx; div r10` -- one-op div r64 is safe); byte loads use `xor rax, rax; mov_b rax, [ptr]`; module basename PascalCase (Main); every label prefixed `curl_`; every fingerprint string carries an explicit `_len` sibling. No `and r11, imm64`; every mask fits in imm32 (0xC1, 0xFF, 0xFFFF). Multi-line string literals absent -- every rodata literal is single-line. sys_open flags = 0x40 (O_CREAT) | 0x01 (O_WRONLY) | 0x80 (O_TRUNC) = 0xC1; vfs_open honours O_CREAT bit-6 for creation and ignores the access-mode bits at R16.M3 per src/kernel/core/fs/vfs_open.pdx header, so 0xC1 is a superset of the currently-honoured shape and a future O_WRONLY/O_TRUNC enforcement landing works as-is.",
       block: {
-        // ---- v1.1-B: marshal HttpRequestRecord@0.1 into curl_record_buf. ----
-        lea r10, [rip + curl_record_buf];
 
-        // [+0]  magic = 0x4C5255434B584450 = "PDXKCURL" (little-endian u64).
+        // ============================================================
+        // Phase A: argv scan
+        // ============================================================
+        // r12 = argc, r13 = argv base, rbx = cursor (starts at 1).
+        // curl_argv_slots is written as we find slots.
+        //   +0  url_ptr, +8 output_ptr, +16 data_ptr, +24 data_len
+        // Zero the slots first (four u64 stores).
+        mov r12, rdi;                              // argc
+        mov r13, rsi;                              // argv
+        lea r14, [rip + curl_argv_slots];
+        xor rax, rax;
+        mov [r14 + 0], rax;
+        mov [r14 + 8], rax;
+        mov [r14 + 16], rax;
+        mov [r14 + 24], rax;
+
+        // Argc gate: minimum 2 (pdxcurl <url>); maximum 32.
+        cmp r12, 2;
+        jl curl_usage;
+        cmp r12, 32;
+        ja curl_usage;
+
+        mov rbx, 1;                                // i = 1 (skip argv[0])
+
+      curl_scan_loop:
+        cmp rbx, r12;
+        jae curl_scan_done;
+        // r14 = argv[i] pointer
+        mov r15, rbx;
+        shl r15, 3;                                // i * 8
+        mov r14, [r13 + r15*1];                    // r14 = argv[i]
+
+        // Peek first byte.
+        xor rax, rax;
+        mov_b rax, [r14 + 0];
+        cmp rax, 0x2d;                             // '-'
+        jne curl_scan_positional;
+
+        // Flag path: could be -o, -d, --output, --data.
+        // Short forms first.
+        xor rax, rax;
+        mov_b rax, [r14 + 1];
+        cmp rax, 0x6f;                             // 'o' -> -o
+        je curl_flag_output_short;
+        cmp rax, 0x64;                             // 'd' -> -d
+        je curl_flag_data_short;
+        cmp rax, 0x2d;                             // '-' -> long form
+        jne curl_usage;
+
+        // Long form: peek bytes 2..
+        xor rax, rax;
+        mov_b rax, [r14 + 2];
+        cmp rax, 0x6f;                             // 'o' -> --output
+        je curl_flag_output_long;
+        cmp rax, 0x64;                             // 'd' -> --data
+        je curl_flag_data_long;
+        jmp curl_usage;
+
+      curl_flag_output_short:
+        // "-o" -- confirm NUL at byte 2.
+        xor rax, rax;
+        mov_b rax, [r14 + 2];
+        cmp rax, 0;
+        jne curl_usage;
+        jmp curl_take_output;
+
+      curl_flag_output_long:
+        // "--output" -- confirm remaining bytes: 'u','t','p','u','t','\0'.
+        xor rax, rax;
+        mov_b rax, [r14 + 3];
+        cmp rax, 0x75;                             // 'u'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 4];
+        cmp rax, 0x74;                             // 't'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 5];
+        cmp rax, 0x70;                             // 'p'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 6];
+        cmp rax, 0x75;                             // 'u'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 7];
+        cmp rax, 0x74;                             // 't'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 8];
+        cmp rax, 0;
+        jne curl_usage;
+        jmp curl_take_output;
+
+      curl_take_output:
+        // Consume next argv slot as the output path.
+        add rbx, 1;
+        cmp rbx, r12;
+        jae curl_usage;                            // missing value
+        mov r15, rbx;
+        shl r15, 3;
+        mov rax, [r13 + r15*1];                    // argv[i+1]
+        lea r15, [rip + curl_argv_slots];
+        // Refuse duplicate --output.
+        mov r8, [r15 + 8];
+        cmp r8, 0;
+        jne curl_usage;
+        mov [r15 + 8], rax;                        // slot[+8] = output_ptr
+        add rbx, 1;
+        jmp curl_scan_loop;
+
+      curl_flag_data_short:
+        // "-d" -- confirm NUL at byte 2.
+        xor rax, rax;
+        mov_b rax, [r14 + 2];
+        cmp rax, 0;
+        jne curl_usage;
+        jmp curl_take_data;
+
+      curl_flag_data_long:
+        // "--data" -- confirm 'a','t','a','\0'.
+        xor rax, rax;
+        mov_b rax, [r14 + 3];
+        cmp rax, 0x61;                             // 'a'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 4];
+        cmp rax, 0x74;                             // 't'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 5];
+        cmp rax, 0x61;                             // 'a'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 6];
+        cmp rax, 0;
+        jne curl_usage;
+        jmp curl_take_data;
+
+      curl_take_data:
+        // Consume next argv slot as the POST body.
+        add rbx, 1;
+        cmp rbx, r12;
+        jae curl_usage;
+        mov r15, rbx;
+        shl r15, 3;
+        mov rax, [r13 + r15*1];                    // argv[i+1]
+        lea r15, [rip + curl_argv_slots];
+        mov r8, [r15 + 16];
+        cmp r8, 0;
+        jne curl_usage;
+        mov [r15 + 16], rax;                       // slot[+16] = data_ptr
+        // strlen inline: walk until NUL, cap at 1024.
+        xor rcx, rcx;
+      curl_data_strlen_loop:
+        xor r8, r8;
+        mov_b r8, [rax + rcx*1];
+        cmp r8, 0;
+        je curl_data_strlen_done;
+        add rcx, 1;
+        cmp rcx, 1024;
+        ja curl_usage;                             // body too big
+        jmp curl_data_strlen_loop;
+      curl_data_strlen_done:
+        mov [r15 + 24], rcx;                       // slot[+24] = data_len
+        add rbx, 1;
+        jmp curl_scan_loop;
+
+      curl_scan_positional:
+        // Positional -- must be the single <url>. Refuse duplicate.
+        lea r15, [rip + curl_argv_slots];
+        mov r8, [r15 + 0];
+        cmp r8, 0;
+        jne curl_usage;
+        mov [r15 + 0], r14;                        // slot[+0] = url_ptr
+        add rbx, 1;
+        jmp curl_scan_loop;
+
+      curl_scan_done:
+        // Require <url>.
+        lea r15, [rip + curl_argv_slots];
+        mov rax, [r15 + 0];
+        cmp rax, 0;
+        je curl_usage;
+
+        // ============================================================
+        // Phase B: URL parse (inline curl_url_parse_inline)
+        // ============================================================
+        // rax = url_ptr from Phase A.
+        // Expect "http://" (7 bytes) or "https://" (8 bytes).
+        // Store scheme (0 or 1) in UrlParse.curl_url_scheme.
+        xor r8, r8;
+        mov_b r8, [rax + 0];
+        cmp r8, 0x68;                              // 'h'
+        jne curl_url_bad;
+        xor r8, r8;
+        mov_b r8, [rax + 1];
+        cmp r8, 0x74;                              // 't'
+        jne curl_url_bad;
+        xor r8, r8;
+        mov_b r8, [rax + 2];
+        cmp r8, 0x74;                              // 't'
+        jne curl_url_bad;
+        xor r8, r8;
+        mov_b r8, [rax + 3];
+        cmp r8, 0x70;                              // 'p'
+        jne curl_url_bad;
+        // byte 4 = 's' (https) OR ':' (http).
+        xor r8, r8;
+        mov_b r8, [rax + 4];
+        cmp r8, 0x3a;                              // ':'
+        je curl_url_scheme_http;
+        cmp r8, 0x73;                              // 's'
+        jne curl_url_bad;
+        // https:// -- check byte 5..7 = "://" and byte 8 host-start
+        xor r8, r8;
+        mov_b r8, [rax + 5];
+        cmp r8, 0x3a;                              // ':'
+        jne curl_url_bad;
+        xor r8, r8;
+        mov_b r8, [rax + 6];
+        cmp r8, 0x2f;                              // '/'
+        jne curl_url_bad;
+        xor r8, r8;
+        mov_b r8, [rax + 7];
+        cmp r8, 0x2f;                              // '/'
+        jne curl_url_bad;
+        // Scheme = HTTPS. Host cursor = 8.
+        mov r9, 1;                                 // scheme = 1
+        mov r15, 8;                                // host cursor
+        jmp curl_url_after_scheme;
+
+      curl_url_scheme_http:
+        // byte 5 = '/', byte 6 = '/'.
+        xor r8, r8;
+        mov_b r8, [rax + 5];
+        cmp r8, 0x2f;                              // '/'
+        jne curl_url_bad;
+        xor r8, r8;
+        mov_b r8, [rax + 6];
+        cmp r8, 0x2f;                              // '/'
+        jne curl_url_bad;
+        xor r9, r9;                                // scheme = 0
+        mov r15, 7;                                // host cursor
+
+      curl_url_after_scheme:
+        // Stash scheme.
+        mov [rip + curl_url_scheme], r9;
+
+        // Remember host start (argv[url] + r15).
+        mov r8, rax;
+        add r8, r15;
+        mov [rip + curl_url_host_ptr], r8;
+
+        // Parse IPv4 dotted-decimal (a.b.c.d).
+        // rdx = folded u32 (MSB-first), r11 = dot count, rcx = current
+        // byte cursor into argv (rcx = r15 at entry), rdi = per-field
+        // digit accum, r10 = per-field digit count. rbx repurposed as
+        // ip-parse scratch until Phase C sets it to port.
+        mov rcx, r15;                              // rcx = cursor
+        xor rdx, rdx;                              // rdx = folded u32
+        xor r11, r11;                              // r11 = dot count
+      curl_ip_field:
+        xor rdi, rdi;                              // per-field acc
+        xor r10, r10;                              // per-field digit count
+      curl_ip_digit_loop:
+        xor r8, r8;
+        mov_b r8, [rax + rcx*1];
+        cmp r8, 0;                                 // NUL
+        je curl_ip_field_end;
+        cmp r8, 0x3a;                              // ':' -- port slug
+        je curl_ip_field_end;
+        cmp r8, 0x2f;                              // '/' -- path slug
+        je curl_ip_field_end;
+        cmp r8, 0x2e;                              // '.'
+        je curl_ip_dot;
+        // digit?
+        sub r8, 48;
+        cmp r8, 9;
+        ja curl_ip_bad;
+        // acc = acc*10 + digit
+        mov r9, rdi;
+        shl rdi, 3;
+        add rdi, r9;
+        add rdi, r9;
+        add rdi, r8;
+        cmp rdi, 255;                              // per-octet cap
+        ja curl_ip_bad;
+        add rcx, 1;
+        add r10, 1;
+        cmp r10, 3;                                // max 3 digits per octet
+        ja curl_ip_bad;
+        jmp curl_ip_digit_loop;
+
+      curl_ip_dot:
+        cmp r10, 0;                                // empty field?
+        je curl_ip_bad;
+        shl rdx, 8;
+        add rdx, rdi;
+        add r11, 1;
+        cmp r11, 3;                                // max 3 dots
+        ja curl_ip_bad;
+        add rcx, 1;                                // skip '.'
+        jmp curl_ip_field;
+
+      curl_ip_field_end:
+        cmp r10, 0;
+        je curl_ip_bad;
+        cmp r11, 3;                                // must have 3 dots
+        jne curl_ip_bad;
+        shl rdx, 8;
+        add rdx, rdi;
+        // ip parsed; rdx = ip u32. Store.
+        mov [rip + curl_url_ip], rdx;
+
+        // Compute host length (rcx - host_start).
+        mov r9, rcx;
+        sub r9, r15;                               // r9 = host_len
+        mov [rip + curl_url_host_len], r9;
+
+        // What terminated the host? Re-read byte at rax+rcx.
+        xor r8, r8;
+        mov_b r8, [rax + rcx*1];
+        cmp r8, 0x3a;                              // ':' -- port slug
+        je curl_url_parse_port;
+        // No port -> default per scheme.
+        mov r9, [rip + curl_url_scheme];
+        cmp r9, 0;
+        je curl_url_port_http;
+        mov r9, 443;
+        jmp curl_url_port_done;
+      curl_url_port_http:
+        mov r9, 80;
+        jmp curl_url_port_done;
+
+      curl_url_parse_port:
+        // rcx points at ':'. Skip it, then parse decimal digits.
+        add rcx, 1;
+        xor r9, r9;                                // port acc
+        xor r10, r10;                              // digit count
+      curl_port_loop:
+        xor r8, r8;
+        mov_b r8, [rax + rcx*1];
+        cmp r8, 0;
+        je curl_port_done_end;
+        cmp r8, 0x2f;                              // '/'
+        je curl_port_done_end;
+        sub r8, 48;
+        cmp r8, 9;
+        ja curl_url_bad;
+        mov rdi, r9;
+        shl r9, 3;
+        add r9, rdi;
+        add r9, rdi;
+        add r9, r8;
+        cmp r9, 65535;
+        ja curl_url_bad;
+        add rcx, 1;
+        add r10, 1;
+        cmp r10, 5;
+        ja curl_url_bad;
+        jmp curl_port_loop;
+      curl_port_done_end:
+        cmp r10, 0;
+        je curl_url_bad;
+
+      curl_url_port_done:
+        mov [rip + curl_url_port], r9;
+
+        // Path parse. rcx points at NUL or '/'.
+        xor r8, r8;
+        mov_b r8, [rax + rcx*1];
+        cmp r8, 0;
+        je curl_url_path_default;
+        // Path starts at rax + rcx; walk to NUL for length.
+        mov r9, rax;
+        add r9, rcx;                               // r9 = path ptr
+        mov [rip + curl_url_path_ptr], r9;
+        xor r10, r10;                              // path len
+      curl_path_len_loop:
+        xor r8, r8;
+        mov_b r8, [rax + rcx*1];
+        cmp r8, 0;
+        je curl_path_len_done;
+        add rcx, 1;
+        add r10, 1;
+        cmp r10, 512;
+        ja curl_url_bad;
+        jmp curl_path_len_loop;
+      curl_path_len_done:
+        mov [rip + curl_url_path_len], r10;
+        jmp curl_url_parse_ok;
+
+      curl_url_path_default:
+        // No path slug -> use CURL_PATH_ROOT = "/".
+        lea r9, [rip + CURL_PATH_ROOT];
+        mov [rip + curl_url_path_ptr], r9;
+        mov r10, 1;
+        mov [rip + curl_url_path_len], r10;
+
+      curl_url_parse_ok:
+        // https:// not wired.
+        mov r9, [rip + curl_url_scheme];
+        cmp r9, 0;
+        jne curl_tls_not_yet;
+
+        // ============================================================
+        // Phase B.5: determine method (0=GET, 1=POST).
+        // ============================================================
+        // POST iff curl_argv_slots+16 (data_ptr) != 0.
+        lea r15, [rip + curl_argv_slots];
+        mov r8, [r15 + 16];
+        cmp r8, 0;
+        je curl_method_get;
+        mov r14, 1;                                // method = POST
+        jmp curl_method_done;
+      curl_method_get:
+        xor r14, r14;                              // method = GET
+      curl_method_done:
+
+        // Latch peer coords for Phase C into callee-save regs.
+        mov rbp, [rip + curl_url_ip];              // rbp = ip u32
+        mov rbx, [rip + curl_url_port];            // rbx = port
+
+        // ============================================================
+        // Phase C.0: emit AUDIT-INTENT record.
+        // ============================================================
+        // HttpRequestRecord@0.1 into curl_audit_record_buf:
+        //   +0  magic ("PDXKCURL")
+        //   +8  version=1 flags=0
+        //   +16 method_and_scheme (method | scheme<<8) status=0
+        //   +24 body_bytes=0
+        //   +32 redirect_count=0 header_count=0
+        //   +40 result_code = RC_INTENT (12) reserved=0
+        lea r15, [rip + curl_audit_record_buf];
         mov rax, [rip + curl_hrr_magic];
-        mov [r10 + 0], rax;
-
-        // [+8]  version_and_flags = 0x0000000000000001 (version=1, flags=0).
-        mov rax, [rip + curl_hrr_version_and_flags];
-        mov [r10 + 8], rax;
-
-        // [+16] method_and_scheme (u32) + status (u32) = 0 at v1.1.0.
+        mov [r15 + 0], rax;
+        mov rax, 1;                                // version=1, flags=0
+        mov [r15 + 8], rax;
+        // Pack method_and_scheme into low 32 bits; scheme in bits [8..15].
+        mov rax, r14;                              // method low byte
+        mov r9, [rip + curl_url_scheme];
+        shl r9, 8;
+        or rax, r9;
+        // Upper 32 bits = status = 0.
+        mov [r15 + 16], rax;
         xor rax, rax;
-        mov [r10 + 16], rax;
+        mov [r15 + 24], rax;                       // body_bytes
+        mov [r15 + 32], rax;                       // redirect + header counts
+        mov rax, 12;                               // RC_INTENT
+        mov [r15 + 40], rax;                       // result_code + reserved
 
-        // [+24] body_bytes (u64) = 0 at v1.1.0.
+        // sys_semantic_send(schema=audit, rec_ptr, 48).
+        mov rdi, [rip + curl_schema_audit];
+        lea rsi, [rip + curl_audit_record_buf];
+        mov rdx, 48;
+        mov rax, 115;
+        syscall;
+
+        // ============================================================
+        // Phase C.1: sys_socket + sys_connect.
+        // ============================================================
+        mov rdi, 2;                                // AF_INET
+        mov rsi, 1;                                // SOCK_STREAM
+        xor rdx, rdx;                              // proto=0
+        mov rax, 87;
+        syscall;
+        cmp rax, 0;
+        jl curl_socket_fail;
+        mov r15, rax;                              // r15 = socket fd
+        // Stash socket fd into .bss so Phase C.2 (which reuses r15 as
+        // a lea into curl_argv_slots) does not lose it. Phase C.3 /
+        // Phase D re-read from curl_sock_fd_slot.
+        mov [rip + curl_sock_fd_slot], r15;
+
+        mov rdi, r15;
+        mov rsi, rbp;                              // ip
+        mov rdx, rbx;                              // port
+        mov rax, 91;
+        syscall;
+        cmp rax, 0;
+        jl curl_connect_fail;
+
+        // ============================================================
+        // Phase C.2: assemble request into curl_req_buf.
+        // r12 = req_len accumulator.
+        // ============================================================
+        xor r12, r12;
+        lea rdi, [rip + curl_req_buf];             // rdi = dst base
+
+        // Method fragment.
+        cmp r14, 0;
+        je curl_emit_get;
+        // POST.
+        lea rsi, [rip + curl_frag_post];
+        mov rdx, 5;                                // curl_frag_post_len
+        jmp curl_copy_frag;
+      curl_emit_get:
+        lea rsi, [rip + curl_frag_get];
+        mov rdx, 4;                                // curl_frag_get_len
+
+      curl_copy_frag:
+        // memcpy(rdi + r12, rsi, rdx). Uses rcx cursor + rax scratch.
+        xor rcx, rcx;
+      curl_copy_frag_loop:
+        cmp rcx, rdx;
+        jae curl_after_method_frag;
         xor rax, rax;
-        mov [r10 + 24], rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_frag_loop;
 
-        // [+32] redirect_count (u32) + header_count (u32) = 0 at v1.1.0.
+      curl_after_method_frag:
+        // Copy path.
+        mov rsi, [rip + curl_url_path_ptr];
+        mov rdx, [rip + curl_url_path_len];
+        xor rcx, rcx;
+      curl_copy_path_loop:
+        cmp rcx, rdx;
+        jae curl_after_path;
         xor rax, rax;
-        mov [r10 + 32], rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_path_loop;
 
-        // [+40] result_code (u32) = INTENT (12) + reserved (u32) = 0.
-        mov rax, 12;
-        mov [r10 + 40], rax;
+      curl_after_path:
+        // Copy " HTTP/1.0\r\n".
+        lea rsi, [rip + curl_frag_http10];
+        mov rdx, 11;
+        xor rcx, rcx;
+      curl_copy_http10_loop:
+        cmp rcx, rdx;
+        jae curl_after_http10;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_http10_loop;
 
-        // ---- sys_semantic_send(schema, rec_ptr, rec_len). SC+ ID 115. ----
-        // schema tag in rdi (u64), record pointer in rsi, record length
-        // (48) in rdx. Return in rax (0 or -errno); intentionally
-        // discarded -- v1.1.0 has no session to describe on failure.
+      curl_after_http10:
+        // "Host: ".
+        lea rsi, [rip + curl_frag_host];
+        mov rdx, 6;
+        xor rcx, rcx;
+      curl_copy_hosthdr_loop:
+        cmp rcx, rdx;
+        jae curl_after_hosthdr;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_hosthdr_loop;
+
+      curl_after_hosthdr:
+        // Copy host substring.
+        mov rsi, [rip + curl_url_host_ptr];
+        mov rdx, [rip + curl_url_host_len];
+        xor rcx, rcx;
+      curl_copy_host_loop:
+        cmp rcx, rdx;
+        jae curl_after_host;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_host_loop;
+
+      curl_after_host:
+        // "\r\n".
+        lea rsi, [rip + curl_frag_crlf];
+        mov rdx, 2;
+        xor rcx, rcx;
+      curl_copy_crlf1_loop:
+        cmp rcx, rdx;
+        jae curl_after_crlf1;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_crlf1_loop;
+
+      curl_after_crlf1:
+        // If POST: Content-Length header + terminator + body.
+        cmp r14, 0;
+        je curl_finish_headers;
+
+        // "Content-Length: ".
+        lea rsi, [rip + curl_frag_clen];
+        mov rdx, 16;
+        xor rcx, rcx;
+      curl_copy_clen_loop:
+        cmp rcx, rdx;
+        jae curl_after_clen;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_clen_loop;
+
+      curl_after_clen:
+        // Decimal-encode data_len into curl_clen_buf. Emit LSD-first,
+        // then reverse-copy into curl_req_buf.
+        lea r15, [rip + curl_argv_slots];
+        mov rax, [r15 + 24];                       // data_len (u64)
+        lea r8, [rip + curl_clen_buf];             // scratch
+        xor r9, r9;                                // digit count
+        cmp rax, 0;
+        jne curl_clen_encode_loop;
+        // data_len == 0: emit single '0'.
+        mov r10, 48;
+        mov_b [r8 + 0], r10;
+        mov r9, 1;
+        jmp curl_clen_encoded;
+      curl_clen_encode_loop:
+        cmp rax, 0;
+        je curl_clen_encoded;
+        mov r10, 10;
+        xor rdx, rdx;
+        div r10;                                   // rax = rax/10, rdx = rax%10
+        add rdx, 48;
+        mov_b [r8 + r9*1], rdx;
+        add r9, 1;
+        jmp curl_clen_encode_loop;
+
+      curl_clen_encoded:
+        // Reverse-copy r9 bytes from r8 (LSD-first) into curl_req_buf
+        // + r12 (MSD-first). rcx counts written, r10 = source index.
+        xor rcx, rcx;
+      curl_clen_rev_loop:
+        cmp rcx, r9;
+        jae curl_after_clen_val;
+        mov r10, r9;
+        sub r10, rcx;
+        sub r10, 1;                                // src idx = r9-1-rcx
+        xor rax, rax;
+        mov_b rax, [r8 + r10*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_clen_rev_loop;
+
+      curl_after_clen_val:
+        // "\r\n".
+        lea rsi, [rip + curl_frag_crlf];
+        mov rdx, 2;
+        xor rcx, rcx;
+      curl_copy_crlf2_loop:
+        cmp rcx, rdx;
+        jae curl_after_crlf2;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_crlf2_loop;
+
+      curl_after_crlf2:
+        // Final "\r\n" (end of headers).
+        lea rsi, [rip + curl_frag_crlf];
+        mov rdx, 2;
+        xor rcx, rcx;
+      curl_copy_crlf3_loop:
+        cmp rcx, rdx;
+        jae curl_after_crlf3_post;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_crlf3_loop;
+
+      curl_after_crlf3_post:
+        // Copy POST body from curl_argv_slots+16 (data_ptr), data_len
+        // bytes.
+        lea r15, [rip + curl_argv_slots];
+        mov rsi, [r15 + 16];
+        mov rdx, [r15 + 24];
+        xor rcx, rcx;
+      curl_copy_body_loop:
+        cmp rcx, rdx;
+        jae curl_req_ready;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_body_loop;
+
+      curl_finish_headers:
+        // GET terminator: single "\r\n".
+        lea rsi, [rip + curl_frag_crlf];
+        mov rdx, 2;
+        xor rcx, rcx;
+      curl_copy_crlf_get_loop:
+        cmp rcx, rdx;
+        jae curl_req_ready;
+        xor rax, rax;
+        mov_b rax, [rsi + rcx*1];
+        mov_b [rdi + r12*1], rax;
+        add r12, 1;
+        add rcx, 1;
+        jmp curl_copy_crlf_get_loop;
+
+      curl_req_ready:
+        // ============================================================
+        // Phase C.3: sys_send. Socket fd re-read from .bss because the
+        // request-assembly block above lea'd r15 into curl_argv_slots.
+        // ============================================================
+        mov rdi, [rip + curl_sock_fd_slot];
+        lea rsi, [rip + curl_req_buf];
+        mov rdx, r12;                              // req_len
+        mov rax, 92;                               // sys_send
+        syscall;
+        cmp rax, 0;
+        jl curl_send_fail;
+
+        // ============================================================
+        // Phase D: sys_recv into curl_resp_buf (single 4 KiB call).
+        // ============================================================
+        mov rdi, [rip + curl_sock_fd_slot];
+        lea rsi, [rip + curl_resp_buf];
+        mov rdx, 4096;
+        mov rax, 93;                               // sys_recv
+        syscall;
+        cmp rax, 0;
+        jl curl_recv_fail;
+        mov r12, rax;                              // r12 = bytes_recv'd
+
+        // Guard: need at least "HTTP/1.X SSS\r\n\r\n" (~20 bytes).
+        cmp r12, 20;
+        jl curl_bad_resp;
+
+        // Parse status: response[9..12] as three ASCII digits.
+        // Byte 9 = '0'..'5' typically (100..599).
+        lea r8, [rip + curl_resp_buf];
+        xor rax, rax;
+        mov_b rax, [r8 + 9];
+        sub rax, 48;
+        cmp rax, 9;
+        ja curl_bad_resp;
+        mov r13, rax;
+        xor rax, rax;
+        mov_b rax, [r8 + 10];
+        sub rax, 48;
+        cmp rax, 9;
+        ja curl_bad_resp;
+        mov r10, r13;
+        shl r13, 3;
+        add r13, r10;
+        add r13, r10;                              // *10
+        add r13, rax;
+        xor rax, rax;
+        mov_b rax, [r8 + 11];
+        sub rax, 48;
+        cmp rax, 9;
+        ja curl_bad_resp;
+        mov r10, r13;
+        shl r13, 3;
+        add r13, r10;
+        add r13, r10;
+        add r13, rax;                              // r13 = status (u32)
+
+        // Find "\r\n\r\n" in response (0x0D 0x0A 0x0D 0x0A). rcx = cursor.
+        xor rcx, rcx;
+      curl_scan_hdrs_loop:
+        mov r10, rcx;
+        add r10, 4;
+        cmp r10, r12;                              // cursor+4 > bytes_recv
+        ja curl_bad_resp;
+        xor rax, rax;
+        mov_b rax, [r8 + rcx*1];
+        cmp rax, 0x0d;
+        jne curl_scan_hdrs_next;
+        xor rax, rax;
+        mov r11, rcx;
+        add r11, 1;
+        mov_b rax, [r8 + r11*1];
+        cmp rax, 0x0a;
+        jne curl_scan_hdrs_next;
+        xor rax, rax;
+        add r11, 1;
+        mov_b rax, [r8 + r11*1];
+        cmp rax, 0x0d;
+        jne curl_scan_hdrs_next;
+        xor rax, rax;
+        add r11, 1;
+        mov_b rax, [r8 + r11*1];
+        cmp rax, 0x0a;
+        jne curl_scan_hdrs_next;
+        // Found. Body starts at rcx+4.
+        add rcx, 4;
+        jmp curl_have_body;
+      curl_scan_hdrs_next:
+        add rcx, 1;
+        jmp curl_scan_hdrs_loop;
+
+      curl_have_body:
+        // Body offset in rcx; body_len = r12 - rcx.
+        mov r9, r12;
+        sub r9, rcx;                               // r9 = body_len
+        // r12 flip: from bytes_recv to body_len for the RESULT record.
+        mov r12, r9;
+        // Compute body pointer.
+        lea r8, [rip + curl_resp_buf];
+        add r8, rcx;                               // r8 = body_ptr
+
+        // ============================================================
+        // Phase D.1: open output fd if --output.
+        // ============================================================
+        lea r15, [rip + curl_argv_slots];
+        mov r9, [r15 + 8];                         // output_ptr
+        cmp r9, 0;
+        je curl_out_stdout;
+        // sys_open(path, O_CREAT|O_WRONLY|O_TRUNC=0xC1, mode=0644).
+        // Save body ptr in .bss slot across the syscall (r8 is caller-
+        // save; rcx/r11 SYSCALL-clobbered).
+        mov [rip + curl_body_ptr_slot], r8;
+        mov [rip + curl_body_len_slot], r12;
+        mov rdi, r9;                               // path
+        mov rsi, 0xC1;                             // flags
+        mov rdx, 0x1A4;                            // mode = 0644 octal
+        mov rax, 2;                                // sys_open
+        syscall;
+        cmp rax, 0;
+        jl curl_open_fail;
+        mov [rip + curl_out_fd_slot], rax;
+        // Restore body ptr / len.
+        mov r8, [rip + curl_body_ptr_slot];
+        mov r12, [rip + curl_body_len_slot];
+        jmp curl_out_ready;
+      curl_out_stdout:
+        mov rax, 1;
+        mov [rip + curl_out_fd_slot], rax;
+
+      curl_out_ready:
+        // sys_write(fd, body_ptr, body_len).
+        mov rdi, [rip + curl_out_fd_slot];
+        mov rsi, r8;
+        mov rdx, r12;
+        mov rax, 1;                                // sys_write
+        syscall;
+        // Ignore short-write; bytes_written = min(returned, r12).
+
+        // Close output fd if not stdout.
+        mov r9, [rip + curl_out_fd_slot];
+        cmp r9, 1;
+        je curl_skip_close_out;
+        mov rdi, r9;
+        mov rax, 3;                                // sys_close
+        syscall;
+      curl_skip_close_out:
+
+        // Close socket.
+        mov rdi, [rip + curl_sock_fd_slot];
+        mov rax, 3;
+        syscall;
+
+        // ============================================================
+        // Phase D.2: emit AUDIT-RESULT record.
+        // ============================================================
+        // result_code:
+        //   status >= 200 && status < 400 -> RC_OK = 0
+        //   status >= 400 && status < 500 -> RC_HTTP_4XX = 5
+        //   status >= 500 && status < 600 -> RC_HTTP_5XX = 6
+        //   else -> RC_HTTP_4XX default
+        xor r9, r9;                                // default RC_OK
+        cmp r13, 400;
+        jl curl_result_ok;
+        cmp r13, 500;
+        jl curl_result_4xx;
+        cmp r13, 600;
+        jl curl_result_5xx;
+        // >=600 treated as 5xx.
+      curl_result_5xx:
+        mov r9, 6;
+        jmp curl_result_encoded;
+      curl_result_4xx:
+        mov r9, 5;
+        jmp curl_result_encoded;
+      curl_result_ok:
+        xor r9, r9;
+
+      curl_result_encoded:
+        // Save result_code for exit computation.
+        mov [rip + curl_result_rc_slot], r9;
+
+        // Marshal audit-RESULT record.
+        lea r15, [rip + curl_audit_record_buf];
+        mov rax, [rip + curl_hrr_magic];
+        mov [r15 + 0], rax;
+        mov rax, 1;
+        mov [r15 + 8], rax;
+        // Pack method_and_scheme (low 32) + status (high 32) into one u64.
+        mov rax, r14;
+        mov r10, [rip + curl_url_scheme];
+        shl r10, 8;
+        or rax, r10;
+        // status in high 32 bits.
+        mov r10, r13;
+        shl r10, 32;
+        or rax, r10;
+        mov [r15 + 16], rax;
+        mov [r15 + 24], r12;                       // body_bytes
+        xor rax, rax;
+        mov [r15 + 32], rax;                       // header + redirect counts
+        mov [r15 + 40], r9;                        // result_code
+
+        mov rdi, [rip + curl_schema_audit];
+        lea rsi, [rip + curl_audit_record_buf];
+        mov rdx, 48;
+        mov rax, 115;
+        syscall;
+
+        // ============================================================
+        // Phase D.3: emit PIPE record (v1.1-B schema, real fields).
+        // ============================================================
+        lea r15, [rip + curl_record_buf];
+        mov rax, [rip + curl_hrr_magic];
+        mov [r15 + 0], rax;
+        mov rax, 1;
+        mov [r15 + 8], rax;
+        // method_and_scheme (low 32) + status (high 32).
+        mov rax, r14;
+        mov r10, [rip + curl_url_scheme];
+        shl r10, 8;
+        or rax, r10;
+        mov r10, r13;
+        shl r10, 32;
+        or rax, r10;
+        mov [r15 + 16], rax;
+        mov [r15 + 24], r12;                       // body_bytes
+        xor rax, rax;
+        mov [r15 + 32], rax;
+        mov [r15 + 40], r9;                        // result_code
+
         mov rdi, [rip + curl_schema_http_req];
         lea rsi, [rip + curl_record_buf];
         mov rdx, 48;
         mov rax, 115;
         syscall;
 
-        // ---- Diagnostic on fd 2 (stderr): "pdxcurl: v1.1.0 stub, ..." ----
-        mov rdi, 2;
-        lea rsi, [rip + curl_msg_stub];
-        mov rdx, 37;                            // curl_msg_stub_len
-        mov rax, 1;                             // sys_write
+        // ============================================================
+        // Phase D.4: sys_exit with taxonomy exit code.
+        // ============================================================
+        // rc -> exit_code:
+        //   RC_OK (0)      -> EXIT_OK       (0)
+        //   RC_HTTP_4XX(5) -> EXIT_HTTP_4XX (4)
+        //   RC_HTTP_5XX(6) -> EXIT_HTTP_5XX (5)
+        mov r9, [rip + curl_result_rc_slot];
+        cmp r9, 5;
+        je curl_exit_4xx;
+        cmp r9, 6;
+        je curl_exit_5xx;
+        // OK.
+        xor rdi, rdi;
+        mov rax, 60;
         syscall;
+        hlt;
+      curl_exit_4xx:
+        mov rdi, 4;
+        mov rax, 60;
+        syscall;
+        hlt;
+      curl_exit_5xx:
+        mov rdi, 5;
+        mov rax, 60;
+        syscall;
+        hlt;
 
-        // ---- sys_exit(2). Argv usage refusal per §7. ----
+        // ============================================================
+        // Diagnostic exit branches. Each emits its diagnostic on fd 2,
+        // an audit-RESULT record with the matching RC_*, then exits
+        // with the taxonomy exit code.
+        // ============================================================
+
+      curl_usage:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_usage];
+        mov rdx, 47;
+        mov rax, 1;
+        syscall;
         mov rdi, 2;
         mov rax, 60;
         syscall;
         hlt;
+
+      curl_url_bad:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_bad_url];
+        mov rdx, 32;
+        mov rax, 1;
+        syscall;
+        mov rdi, 2;
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_ip_bad:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_bad_ip];
+        mov rdx, 37;
+        mov rax, 1;
+        syscall;
+        mov rdi, 2;
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_tls_not_yet:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_tls_not_yet];
+        mov rdx, 38;
+        mov rax, 1;
+        syscall;
+        // Inline audit-RESULT emit: RC_TLS_HANDSHAKE_FAILED = 4.
+        // curl_url_scheme = 1 here (https:// path); method still 0.
+        lea r15, [rip + curl_audit_record_buf];
+        mov rax, [rip + curl_hrr_magic];
+        mov [r15 + 0], rax;
+        mov rax, 1;
+        mov [r15 + 8], rax;
+        mov rax, 0x0100;                           // method=0, scheme=1<<8
+        mov [r15 + 16], rax;
+        xor rax, rax;
+        mov [r15 + 24], rax;
+        mov [r15 + 32], rax;
+        mov rax, 4;                                // RC_TLS_HANDSHAKE_FAILED
+        mov [r15 + 40], rax;
+        mov rdi, [rip + curl_schema_audit];
+        lea rsi, [rip + curl_audit_record_buf];
+        mov rdx, 48;
+        mov rax, 115;
+        syscall;
+        mov rdi, 9;                                // EXIT_TLS_HANDSHAKE_FAILED
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_socket_fail:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_socket_fail];
+        mov rdx, 23;
+        mov rax, 1;
+        syscall;
+        mov rdi, 4;                                // ad-hoc socket failure
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_connect_fail:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_connect_fail];
+        mov rdx, 24;
+        mov rax, 1;
+        syscall;
+        // Inline audit-RESULT emit: RC_CONN_REFUSED = 2.
+        // Pack method (r14) | scheme<<8 in low 32; upper 32 = 0.
+        lea r15, [rip + curl_audit_record_buf];
+        mov rax, [rip + curl_hrr_magic];
+        mov [r15 + 0], rax;
+        mov rax, 1;
+        mov [r15 + 8], rax;
+        mov rax, r14;
+        mov r10, [rip + curl_url_scheme];
+        shl r10, 8;
+        or rax, r10;
+        mov [r15 + 16], rax;
+        xor rax, rax;
+        mov [r15 + 24], rax;
+        mov [r15 + 32], rax;
+        mov rax, 2;                                // RC_CONN_REFUSED
+        mov [r15 + 40], rax;
+        mov rdi, [rip + curl_schema_audit];
+        lea rsi, [rip + curl_audit_record_buf];
+        mov rdx, 48;
+        mov rax, 115;
+        syscall;
+        mov rdi, 7;                                // EXIT_CONN_REFUSED
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_send_fail:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_send_fail];
+        mov rdx, 21;
+        mov rax, 1;
+        syscall;
+        mov rdi, 7;
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_recv_fail:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_recv_fail];
+        mov rdx, 21;
+        mov rax, 1;
+        syscall;
+        mov rdi, 7;
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_open_fail:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_open_fail];
+        mov rdx, 26;
+        mov rax, 1;
+        syscall;
+        mov rdi, 3;                                // EXIT_CAPS_REFUSED
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_bad_resp:
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_bad_resp];
+        mov rdx, 33;
+        mov rax, 1;
+        syscall;
+        mov rdi, 2;
+        mov rax, 60;
+        syscall;
+        hlt;
+
       }
     }
+
+  // ==================================================================
+  // Phase-C spill slots (see _start justification for register plan).
+  // ==================================================================
+  //   curl_sock_fd_slot  -- socket fd cached before request assembly
+  //                          clobbers r15 (which becomes lea into
+  //                          curl_argv_slots + curl_argv_slots-derived
+  //                          scratch during Content-Length encode).
+  //   curl_out_fd_slot   -- output fd (from sys_open or 1 for stdout).
+  //   curl_body_ptr_slot -- body ptr saved across sys_open (caller-save
+  //                          scratch would otherwise be clobbered).
+  //   curl_body_len_slot -- body len saved across sys_open.
+  //   curl_result_rc_slot-- RC_* value emitted in RESULT record; the
+  //                          exit-code branch reads it back for the
+  //                          taxonomy exit code.
+  pub let mut curl_sock_fd_slot      : u64 = uninit @align(8)
+  pub let mut curl_out_fd_slot       : u64 = uninit @align(8)
+  pub let mut curl_body_ptr_slot     : u64 = uninit @align(8)
+  pub let mut curl_body_len_slot     : u64 = uninit @align(8)
+  pub let mut curl_result_rc_slot    : u64 = uninit @align(8)
 
 }

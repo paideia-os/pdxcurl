@@ -1,0 +1,107 @@
+// src/url_parse.pdx -- pdxcurl v1.3.0 (Wave CC: pdxcurl#4)
+// UrlParse module: local url_parse constants + shared .bss result slots.
+//
+// Purpose
+// -------
+// pdxcurl-design.md §5 mandates a `<url>` positional argument of the
+// shape `scheme://host[:port]/path`. libpdx-url does not exist at the
+// v1.3.0 landing, so pdxcurl carries a hand-rolled parser inline in
+// src/main.pdx. This module holds the FROZEN result-shape .bss slots
+// the inline parser writes into + the constants the inline parser
+// consumes (default ports, prefix strings, prefix wire lengths).
+//
+// A future libpdx-url landing swaps the inline parser body in
+// src/main.pdx for a call to `libpdx_url::parse` without touching
+// this module's public surface (result-slot names + widths stable).
+//
+// Parser surface (frozen at v1.3.0)
+// ---------------------------------
+// Input : NUL-terminated pointer to argv[<url-slot>] (writable per
+//         execve ABI copy-in; parser DOES NOT mutate the source).
+// Output: five .bss slots populated on success:
+//   curl_url_scheme    (u64) : 0 = http, 1 = https
+//   curl_url_ip        (u64) : IPv4 dotted-decimal folded MSB-first
+//                              (matches sys_connect's ip_u32 shape;
+//                              hostname resolution is deferred until a
+//                              DNS user syscall lands)
+//   curl_url_port      (u64) : parsed port (0..65535); default 80 for
+//                              http, 443 for https when no :PORT slug
+//   curl_url_path_ptr  (u64) : VA into argv[url] at first '/' after
+//                              host[:port]; NUL-terminated; if no '/'
+//                              slug present, points at CURL_PATH_ROOT
+//                              ("/\0") .rodata below
+//   curl_url_path_len  (u64) : wire byte count of the path (excludes NUL)
+//   curl_url_host_ptr  (u64) : VA into argv[url] at first byte of
+//                              host substring (NOT NUL-terminated;
+//                              length carried separately)
+//   curl_url_host_len  (u64) : wire byte count of the host substring
+//                              (0 < host_len <= CURL_HOST_MAX = 253)
+//
+// Failure surface: the inline parser jumps to a curl_url_bad label on
+// any malformed input; that label emits a diagnostic on fd 2 and exits
+// EXIT_ARGV_USAGE (=2). No error state is written to the .bss slots.
+//
+// v1.3.0 scope caveats
+// --------------------
+//   - Only IPv4 dotted-decimal hosts accepted (a.b.c.d, each 0..255).
+//     A DNS-name host jumps to curl_url_bad. Blocks on paideia-os
+//     landing a user-space DNS syscall (currently kernel-internal
+//     only; see src/kernel/core/net/dns.pdx).
+//   - https:// is parsed to `curl_url_scheme=1` but the inline
+//     http_client body in src/main.pdx refuses non-http (jumps to
+//     curl_tls_not_yet), matching the M3-001 (pdxcurl#8) blockage.
+//   - IPv6 literals `[::1]` not accepted (design-doc §5 v1 scope).
+//
+// paideia-as compliance
+// ---------------------
+//   - Module UrlParse (PascalCase basename).
+//   - No function bodies -> no register plan, no encoder guardrails.
+//   - `pub let mut ... = uninit` for every result slot (.bss).
+//   - u64 storage for every slot so an aligned rip-relative load
+//     is one instruction (mov r64, [rip + LABEL]).
+//   - CURL_PATH_ROOT is a 2-byte .rodata literal "/\0" whose _LEN
+//     sibling is 1 (wire byte count excludes NUL); the inline parser
+//     assigns curl_url_path_ptr = lea [rip + CURL_PATH_ROOT] when
+//     the URL carries no '/' slug.
+
+module UrlParse = structure {
+
+  // ---- scheme prefix rodata + wire lengths (excludes trailing NUL) ----
+  pub let CURL_PREFIX_HTTP        : [u8; 8]  = "http://\0"
+  pub let CURL_PREFIX_HTTP_LEN    : u64      = 7
+  pub let CURL_PREFIX_HTTPS       : [u8; 9]  = "https://\0"
+  pub let CURL_PREFIX_HTTPS_LEN   : u64      = 8
+
+  // ---- default ports per scheme (u16 folded in u64 slot) --------------
+  pub let CURL_PORT_HTTP_DEFAULT  : u64      = 80
+  pub let CURL_PORT_HTTPS_DEFAULT : u64      = 443
+
+  // ---- scheme enum (u32 in u64 slot; matches HRR method_and_scheme) ---
+  pub let CURL_SCHEME_HTTP        : u64      = 0
+  pub let CURL_SCHEME_HTTPS       : u64      = 1
+
+  // ---- default path when the URL carries no '/' slug ------------------
+  // curl treats "http://host" and "http://host/" as equivalent; the
+  // inline parser assigns curl_url_path_ptr = &CURL_PATH_ROOT[0] +
+  // curl_url_path_len = CURL_PATH_ROOT_LEN when it sees NUL right after
+  // the host[:port] slug.
+  pub let CURL_PATH_ROOT          : [u8; 2]  = "/\0"
+  pub let CURL_PATH_ROOT_LEN      : u64      = 1
+
+  // ---- host / path substring bounds (defence-in-depth) ---------------
+  //   CURL_HOST_MAX  = 253 -- RFC 1035 §2.3.4 total FQDN length ceiling
+  //   CURL_PATH_MAX  = 512 -- pdxcurl-design.md §5 request-line ceiling
+  //                          (path + method + " HTTP/1.0\r\n" <= 1 KiB)
+  pub let CURL_HOST_MAX           : u64      = 253
+  pub let CURL_PATH_MAX           : u64      = 512
+
+  // ---- result slots (.bss; written by the inline parser in main.pdx) --
+  pub let mut curl_url_scheme     : u64      = uninit @align(8)
+  pub let mut curl_url_ip         : u64      = uninit @align(8)
+  pub let mut curl_url_port       : u64      = uninit @align(8)
+  pub let mut curl_url_host_ptr   : u64      = uninit @align(8)
+  pub let mut curl_url_host_len   : u64      = uninit @align(8)
+  pub let mut curl_url_path_ptr   : u64      = uninit @align(8)
+  pub let mut curl_url_path_len   : u64      = uninit @align(8)
+
+}

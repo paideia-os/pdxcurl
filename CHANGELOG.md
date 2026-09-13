@@ -15,10 +15,119 @@ Version discipline:
              argv-surface rodata half, M1-003 --dry-run rodata
              reservation, M3-003 semantic-pipe honest witness,
              M3-005 error-taxonomy rodata namespace.
-  v1.3.0 -- reserved for the M5-001 dual-signed release-source
-             landing (pdxcurl#18), following the pdxsock precedent
-             (slid one minor from v1.2.0 to collect more drain).
+  v1.3.0 -- unsigned source-tag release (2026-09-13). Wave CC drain:
+             M2/M3 real bodies -- inline url_parse (pdxcurl#4), real
+             HTTP-only GET (pdxcurl#5), --output file (pdxcurl#6),
+             --data / POST body (pdxcurl#7), libpdx-audit INTENT +
+             RESULT record pair (pdxcurl#9). M5-001 dual-signed
+             release-source landing slides one more minor.
 -->
+
+## [1.3.0] -- 2026-09-13 -- Wave CC M2/M3 real bodies (unsigned source-tag)
+
+### Added
+
+- **Inline url_parse (pdxcurl#4, M2-001).** New `src/url_parse.pdx`
+  module `UrlParse` exposes the frozen parser result-shape as .bss
+  slots (`curl_url_scheme`, `curl_url_ip`, `curl_url_port`,
+  `curl_url_host_ptr`, `curl_url_host_len`, `curl_url_path_ptr`,
+  `curl_url_path_len`), scheme prefix rodata (`CURL_PREFIX_HTTP` /
+  `CURL_PREFIX_HTTPS` + `_LEN` siblings), default port constants
+  (`CURL_PORT_HTTP_DEFAULT` = 80, `CURL_PORT_HTTPS_DEFAULT` = 443),
+  and the `CURL_PATH_ROOT` = "/" default-path literal. The parser
+  BODY lives inline in `src/main.pdx`'s `_start` block (Phase B --
+  http:// prefix + IPv4 dotted-decimal host [a.b.c.d, 0..255 each,
+  max 3 digits per octet] + optional :PORT slug + optional /path
+  slug). libpdx-url does not exist in-repo; a future landing swaps
+  the inline parser for `libpdx_url::parse` without touching the
+  result-slot names or widths. https:// parses to scheme=1 but the
+  request-path branch jumps to `curl_tls_not_yet` (exit
+  `EXIT_TLS_HANDSHAKE_FAILED` = 9) since M3-001 / pdxcurl#8 is not
+  yet wired.
+
+- **HTTP-only GET (pdxcurl#5, M2-002).** `src/main.pdx`'s `_start`
+  Phase C wires the real socket-family call chain: `sys_socket`
+  (SC+ 87, AF_INET/SOCK_STREAM) + `sys_connect` (SC+ 91, ip_u32 +
+  port) + `sys_send` (SC+ 92) of the assembled request +
+  `sys_recv` (SC+ 93) of the response into a 4 KiB scratch. Every
+  syscall failure has its own diagnostic on fd 2 and a distinct
+  nonzero exit status (`EXIT_CONN_REFUSED` = 7, etc.). Response
+  parse extracts HTTP status from bytes [9..12] of the first line
+  and finds the body via a linear `\r\n\r\n` scan. Response body
+  cap = 4 KiB single-recv MVP; a recv-loop landing is tracked as
+  a follow-up.
+
+- **--output FILE (pdxcurl#6, M2-003).** When `-o` / `--output` is
+  present in argv, Phase D.1 calls `sys_open` (SC+ 2) with flags
+  `O_CREAT | O_WRONLY | O_TRUNC` (0xC1) + mode 0644 (0x1A4) for
+  the output path, writes the response body via `sys_write`
+  (SC+ 1) to the returned fd, then `sys_close` (SC+ 3) it. Absent
+  `--output` writes the body to fd 1 (stdout). `sys_open` failure
+  emits `pdxcurl: open output fail\n` on fd 2 and exits
+  `EXIT_CAPS_REFUSED` = 3.
+
+- **--data / POST body (pdxcurl#7, M2-004).** When `-d` / `--data`
+  is present in argv, the scanner captures the body pointer +
+  computed strlen (`curl_argv_slots+16` / `+24`; body cap = 1024
+  bytes) and Phase C.2 assembles a POST request instead of GET:
+  request-line `POST <path> HTTP/1.0\r\n`, `Host: <host>\r\n`,
+  `Content-Length: <decimal>\r\n\r\n<body>`. The decimal encode
+  for Content-Length uses `div r64` (one-op form; two-op `imul` is
+  banned per user memory `pdx encoder pitfalls`) with an LSD-first
+  scratch buffer (`curl_clen_buf`, 24 B) that's reversed on emit
+  into `curl_req_buf`.
+
+- **libpdx-audit INTENT + RESULT (pdxcurl#9, M3-002).** New
+  `src/audit_emit.pdx` module `AuditEmit` exposes the audit schema
+  tag (`curl_schema_audit` = 0x0100_7475_4172_7543 = "CurAut"+01)
+  + a 48-byte `curl_audit_record_buf` .bss slot distinct from the
+  pipe-emit record. Phase C.0 emits an INTENT
+  `HttpRequestRecord@0.1` with `result_code = RC_INTENT` (12)
+  BEFORE `sys_connect`; Phase D.2 emits a RESULT record AFTER the
+  response parse with `status` + `body_bytes` filled and
+  `result_code = RC_OK` (2xx) / `RC_HTTP_4XX` (5) / `RC_HTTP_5XX`
+  (6). Failure branches (`curl_connect_fail`,
+  `curl_tls_not_yet`) inline-emit a RESULT record with
+  `RC_CONN_REFUSED` (2) / `RC_TLS_HANDSHAKE_FAILED` (4). All
+  audit records travel under a distinct schema tag from the pipe
+  emit so a semantic-pipe consumer dispatches cleanly by schema.
+  libpdx-audit does not exist in-repo; a future landing swaps
+  `sys_semantic_send` for a real `audit_append_leaf` IPC send
+  without changing the record shape.
+
+### Changed
+
+- **`src/main.pdx` FULL BODY REWRITE.** Retires the v1.2.0 argv-
+  refusing STUB (which emitted a single HRR record then exited 2)
+  with a real HTTP driver. The v1.1-B semantic-pipe emit is
+  preserved (schema 0x4874747052657101 = "HttpReq"+01, 48-byte
+  record) with all numeric fields now real (`method_and_scheme`
+  from method + scheme, `status` from response parse, `body_bytes`
+  from the write-count, `result_code` from the branch outcome)
+  instead of zero.
+
+- **`PDX_TOOL_VERSION` bumped `1.2.0` -> `1.3.0`** in
+  `src/tool_ident.pdx`.
+
+- **`manifest.pdxproj` version -> 1.3.0**; `sources:` list gains
+  `src/url_parse.pdx` + `src/audit_emit.pdx`.
+
+### Not shipped (still deferred)
+
+- pdxcurl#8 M3-001 net_tls_wrap / https:// -- blocks on libpdx-net
+  M5 landing.
+- pdxcurl#11 M3-004 --audit-only body -- flag literal in
+  `src/argv_surface.pdx` honoured by scanner (rejects unknown
+  flags, exits usage) but the branch-body is not wired.
+- Response body > 4 KiB (single sys_recv MVP; recv-loop follow-up).
+- Chunked transfer-encoding parse (HTTP/1.0 in the request-line
+  suppresses in most stacks).
+- -H / --header repeated flag (namespace landed at v1.2.0 in
+  `src/argv_surface.pdx`; scanner does not consume yet).
+- -X / --method override to force HEAD / PUT / DELETE (v1.3.0
+  picks GET when --data absent, POST when present).
+- Redirect follow chain (pdxcurl scope: `redirect_count` field in
+  HRR stays zero at v1.3.0).
 
 ## [1.2.0] -- 2026-09-13 -- Wave V drain (unsigned source-tag)
 

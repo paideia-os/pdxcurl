@@ -1,6 +1,6 @@
 # pdxcurl -- paideia-as build manifest
 #
-# Wave: R100  Milestone: Wave V foundation-issue drain
+# Wave: R100  Milestone: Wave CC (M2/M3 real-body drain)
 # Doc:  design/networking/pdxcurl-design.md +
 #       design/networking/r100-user-tools-plan.md §12.3 + §13.3
 #       (paideia-os repo).
@@ -11,7 +11,42 @@
 # release-time dual-sign at a future M5 additionally invokes
 # paideia-pq-sign::sign_release_artifact (Ed25519 + ML-DSA-65 hybrid).
 #
-# v1.2.0 (Wave V drain, this landing) closes:
+# v1.3.0 (Wave CC drain, this landing) closes:
+#   - pdxcurl#4  M2-001 libpdx-url integration -- inline url_parse
+#     landed in src/main.pdx (http:// + IPv4 dotted-decimal +
+#     optional :PORT + optional /path); scheme/ip/port/host/path
+#     slots public in src/url_parse.pdx module UrlParse. libpdx-url
+#     does not exist in-repo yet; a future landing swaps the inline
+#     parser call-site for `libpdx_url::parse` without touching the
+#     result-slot names.
+#   - pdxcurl#5  M2-002 HTTP-only GET -- real sys_socket(87) +
+#     sys_connect(91) + sys_send(92) + sys_recv(93) path. Response
+#     parse recovers HTTP status from bytes [9..12] of the first
+#     line and finds the body via "\r\n\r\n" scan. HTTPS still
+#     refused (jumps to curl_tls_not_yet); pdxcurl#8 blocks on
+#     libpdx-net M5.
+#   - pdxcurl#6  M2-003 --output FILE -- sys_open(2) with flags
+#     O_CREAT|O_WRONLY|O_TRUNC (0xC1) + mode 0644, then sys_write(1)
+#     of the parsed body, then sys_close(3). Absent --output writes
+#     body to fd 1 (stdout).
+#   - pdxcurl#7  M2-004 --data / POST body -- --data or -d captures
+#     the POST payload and triggers the POST request path (method
+#     enum=1); Content-Length header decimal-encoded inline from the
+#     scanner-computed data_len (u64 div-by-10 loop, LSD-first,
+#     reversed on emit). Data payload capped at 1024 bytes.
+#   - pdxcurl#9  M3-002 libpdx-audit INTENT+RESULT -- local audit
+#     surface in src/audit_emit.pdx (module AuditEmit) plus inline
+#     emits in src/main.pdx via sys_semantic_send(115) under schema
+#     0x0100747541727543 ("CurAut"+01). INTENT record emitted BEFORE
+#     sys_socket (result_code=RC_INTENT=12); RESULT record emitted
+#     AFTER sys_recv success or from every failure branch (rc chosen
+#     from src/error_taxonomy.pdx: RC_OK / RC_HTTP_4XX / RC_HTTP_5XX
+#     on success, RC_CONN_REFUSED / RC_TLS_HANDSHAKE_FAILED on
+#     failure). libpdx-audit does not exist in-repo yet; a future
+#     landing swaps the sys_semantic_send emit for a real
+#     audit_append_leaf IPC send without changing the record shape.
+#
+# v1.2.0 (Wave V drain, previous landing) closed:
 #   - pdxcurl#1  M1-001 scaffold + caps.decl (formally closed --
 #     the scaffold already landed at v1.1.0; the drain reconciles
 #     the tracker with the shipped state)
@@ -49,7 +84,7 @@
 #     before minting hybrid signatures).
 
 name        = pdxcurl
-version     = 1.2.0
+version     = 1.3.0
 kind        = tool
 entry       = _start                    # src/main.pdx
 output      = build-out/pdxcurl.elf
@@ -58,10 +93,15 @@ caps_decl   = caps.decl
 # --- Source list (order-insensitive; paideia-as resolves module deps
 # from `module <Basename> = structure { ... }` headers).
 sources:
-  - src/main.pdx                  # v1.1-B: STUB entry + HttpRequestRecord emit
+  - src/main.pdx                  # v1.3.0 REAL: argv scan + url parse + http
+                                  # get/post + --output file + audit emit
   - src/tool_ident.pdx            # PDX_TOOL_NAME / PDX_TOOL_VERSION (Wave 6)
   - src/error_taxonomy.pdx        # v1.2.0 Wave V (pdxcurl#12): RC_*/EXIT_* rodata
   - src/argv_surface.pdx          # v1.2.0 Wave V (pdxcurl#2):  flag-name rodata
+  - src/url_parse.pdx             # v1.3.0 Wave CC (pdxcurl#4): URL constants +
+                                  # shared .bss result slots (curl_url_*)
+  - src/audit_emit.pdx            # v1.3.0 Wave CC (pdxcurl#9): audit schema tag
+                                  # + curl_audit_record_buf (48 B .bss)
 
 # --- Library dependencies ----------------------------------------------
 # pdxcurl at v1.1.0 depends on nothing outside the SC+ syscall floor

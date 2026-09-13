@@ -1,0 +1,91 @@
+// src/audit_emit.pdx -- pdxcurl v1.3.0 (Wave CC: pdxcurl#9)
+// AuditEmit module: local audit_append_leaf wire + INTENT/RESULT record
+// scratch state.
+//
+// Purpose
+// -------
+// pdxcurl-design.md §4 mandates a paired-record audit trail: an
+// INTENT record BEFORE DNS/connect, a RESULT record AFTER the response
+// (or after every failure branch). libpdx-audit does not exist at the
+// v1.3.0 landing, so pdxcurl carries a local audit surface that emits
+// through the same sys_semantic_send (SC+ ID 115, R107-M0-001 #2350)
+// substrate the M3-003 pipe emit already uses -- distinct schema tag
+// so a semantic-pipe consumer can key off the tag before parsing.
+//
+// The two records SHARE the HttpRequestRecord@0.1 shape (48 bytes,
+// layout in src/main.pdx top comment) but travel under a DIFFERENT
+// schema tag from the M3-003 pipe emit so downstream consumers see
+// two distinct streams:
+//
+//   0x4874747052657101  "HttpReq" + version 0x01  -- pipe emit
+//                                                    (unchanged from v1.1-B)
+//   0x4361757241757401  "CurAut"  + version 0x01  -- audit emit
+//                                                    (NEW at v1.3.0)
+//
+// The audit stream distinguishes INTENT from RESULT via the
+// result_code field (offset +40 within the 48-byte record):
+//   RC_INTENT   (12)   -- INTENT record, emitted BEFORE connect
+//   RC_OK / RC_HTTP_4XX / RC_HTTP_5XX / RC_CONN_REFUSED / RC_DNS_FAILED /
+//     RC_TLS_KEY_MISMATCH / etc. -- RESULT record, emitted AFTER
+//                                    the response or from a failure branch
+//
+// A future libpdx-audit landing swaps the sys_semantic_send emit for
+// a real audit_append_leaf call (an IPC send to svc.audit-journal
+// under KIND_IPC_ENDPOINT). The record shape stays 48 bytes so the
+// swap is a call-site edit in src/main.pdx, not a schema churn here.
+//
+// Emit sites in src/main.pdx (frozen at v1.3.0)
+// ---------------------------------------------
+//   audit-INTENT before sys_socket:
+//     - method_and_scheme = packed (r14 low byte | scheme_byte << 8)
+//     - status / body_bytes / header_count / redirect_count = 0
+//     - result_code = RC_INTENT
+//   audit-RESULT after sys_recv + status parse (success):
+//     - method_and_scheme = same packed byte
+//     - status = parsed HTTP status (200..599)
+//     - body_bytes = bytes written to output fd
+//     - result_code = RC_OK / RC_HTTP_4XX / RC_HTTP_5XX
+//   audit-RESULT from a failure branch:
+//     - method_and_scheme = same packed byte
+//     - result_code = specific RC_* from src/error_taxonomy.pdx
+//     - status / body_bytes = 0 (no response landed)
+//
+// paideia-as compliance
+// ---------------------
+//   - Module AuditEmit (PascalCase basename).
+//   - No function bodies -> no register plan, no encoder guardrails.
+//   - u64 storage for the schema tag so `mov r64, [rip + LABEL]` loads
+//     it in one aligned instruction (proven pattern at
+//     sys_semantic_send.pdx line 214).
+//   - The audit record buffer is a SEPARATE 48-byte .bss slot from
+//     the pipe record buffer (curl_record_buf in src/main.pdx) so a
+//     future landing that emits BOTH streams per invocation (pipe +
+//     audit) does not clobber the pipe record's marshalled state.
+
+module AuditEmit = structure {
+
+  // ---- audit schema fingerprint (u64, ASCII "CurAut" + version 0x01) ---
+  // Grep-searchable stable constant; the wire byte order is little-
+  // endian u64 = 0x0000004361757241 for "CurAu" but we pack "CurAut"
+  // + version 1 into 8 bytes:
+  //   'C'  'u'  'r'  'A'  'u'  't'  \0   0x01
+  //  0x43 0x75 0x72 0x41 0x75 0x74 0x00 0x01
+  // Little-endian u64 = 0x0100_7475_4172_7543.
+  pub let curl_schema_audit          : u64 = 0x0100747541727543
+
+  // ---- audit record marshalling buffer (48 B, distinct from pipe) -----
+  // Same 48-byte HttpRequestRecord@0.1 layout as curl_record_buf in
+  // src/main.pdx. Populated by the two emit sites (INTENT + RESULT)
+  // in main.pdx. .bss-resident; every field is overwritten at emit
+  // time.
+  pub let mut curl_audit_record_buf  : [u8; 48] = uninit @align(8)
+
+  // ---- diagnostic tag for a hypothetical audit-emit debug print -------
+  // Not consumed at v1.3.0; reserved for a future --verbose flag that
+  // renders "audit: INTENT (rc=12)" / "audit: RESULT (rc=N)" on fd 2.
+  pub let curl_msg_audit_intent      : [u8; 23] = "audit: INTENT emitted\n\0"
+  pub let curl_msg_audit_intent_len  : u64      = 22
+  pub let curl_msg_audit_result      : [u8; 23] = "audit: RESULT emitted\n\0"
+  pub let curl_msg_audit_result_len  : u64      = 22
+
+}
