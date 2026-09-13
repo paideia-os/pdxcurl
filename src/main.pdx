@@ -1,4 +1,6 @@
-// src/main.pdx -- pdxcurl v1.3.0 REAL M2/M3 body (Wave CC).
+// src/main.pdx -- pdxcurl v1.4.0 REAL M2/M3 body (Wave CC) + Wave HH
+//                  M3-001 --trust= gate / net_tls_wrap wiring +
+//                  M3-004 --audit-only INTENT-only path.
 //
 // v1.3.0 lands the M2/M3 real bodies for:
 //   pdxcurl#4  M2-001 libpdx-url integration    (inline url_parse; libpdx-url
@@ -24,25 +26,52 @@
 // keep parsing v1.3.0 records against the same schema tag; the shape
 // is unchanged, only the field VALUES become real.
 //
-// What v1.3.0 does NOT land
-// -------------------------
-//   - TLS / https:// (pdxcurl#8, M3-001) -- https URL is parsed but
-//     the request path jumps to curl_tls_not_yet (exit EXIT_TLS_HAND
-//     SHAKE_FAILED=9). Blocks on paideia-os libpdx-net M5.
-//   - DNS-name hosts. Only IPv4 dotted-decimal (a.b.c.d) accepted;
-//     a non-numeric host jumps to curl_url_bad (exit EXIT_ARGV_USAGE
-//     =2). Blocks on a user-space DNS syscall landing.
-//   - -H / --header (pdxcurl#11, M3-004 --audit-only) -- accepted at
-//     the argv scanner but the header-list is not marshalled into the
-//     request assembly at v1.3.0.
+// v1.4.0 Wave HH additions (pdxcurl#8, pdxcurl#11)
+// -------------------------------------------------
+//   - TLS / https:// (pdxcurl#8, M3-001): https:// is refused UNLESS
+//     the argv scan captured a `--trust=cap:<n>` token (parsed inline
+//     in Phase A; see curl_flag_trust_long / curl_take_trust below).
+//     With a trust token present, Phase C.1 calls
+//     TlsWire::tls_wire_net_tls_wrap(sock_fd, trust_cap_n, host_ptr,
+//     host_len) (src/tls_wire.pdx) right after sys_connect succeeds.
+//     tls_wire_net_tls_wrap is a WEAK STUB (this toolchain has no
+//     STB_WEAK binding -- see src/tls_wire.pdx header): it always
+//     returns 0 (success-passthrough), so the request proceeds in
+//     plaintext over the raw TCP socket rather than performing a real
+//     TLS handshake. This is a wiring landing, not a real handshake --
+//     KIND_TLS_TRUST cap minting still blocks on pdxtrust M1 (caps.decl
+//     keeps KIND_TLS_TRUST optional pending that landing) and a real
+//     handshake blocks on libpdx-net M5. https:// WITHOUT --trust=
+//     still refuses at curl_tls_not_yet (exit EXIT_TLS_HANDSHAKE_
+//     FAILED=9), unchanged from v1.3.0.
+//   - --audit-only (pdxcurl#11, M3-004): when the argv scan captures
+//     the bare `--audit-only` flag, Phase B.4 short-circuits directly
+//     from curl_url_parse_ok to curl_audit_only_path: an INTENT
+//     HttpRequestRecord@0.1 (result_code=RC_AUDIT_ONLY=11) is emitted
+//     to the audit sink (sys_semantic_send, schema=curl_schema_audit)
+//     AND a human-readable fingerprint is written to fd 2, then
+//     sys_exit(EXIT_SUCCESS_AUDIT_ONLY=200) -- a distinct exit status
+//     from the ordinary success path (0) so a caller can tell an
+//     audit-only run apart from a completed request without parsing
+//     the audit stream. No sys_socket/connect/send/recv and no
+//     semantic-pipe HttpRequestRecord@0.1 (that stream is reserved for
+//     completed requests per M3-003's contract) run on this path.
+//
+// What v1.4.0 still does NOT land
+// --------------------------------
+//   - A real TLS handshake (net_tls_wrap stays a passthrough stub;
+//     see above). DNS-name hosts. Only IPv4 dotted-decimal (a.b.c.d)
+//     accepted; a non-numeric host jumps to curl_url_bad (exit
+//     EXIT_ARGV_USAGE=2). Blocks on a user-space DNS syscall landing.
+//   - -H / --header -- accepted at the argv scanner but the
+//     header-list is not marshalled into the request assembly.
 //   - -X / --method with GET/POST alternatives (HEAD/PUT/DELETE)
-//     (pdxcurl scope: v1.3.0 handles POST when --data present, GET
+//     (pdxcurl scope: v1.4.0 handles POST when --data present, GET
 //     otherwise; -X override to force PUT/DELETE deferred).
-//   - --dry-run (pdxcurl#3) and --audit-only (pdxcurl#11) -- flag
-//     literals in src/argv_surface.pdx honoured by the scanner but
-//     the flag-body branches are STUB (write reserved diagnostic +
-//     exit 0). The two RC_DRY_RUN/RC_AUDIT_ONLY result-codes emit
-//     an audit-INTENT record but no network I/O.
+//   - --dry-run (pdxcurl#3) -- flag literal in src/argv_surface.pdx
+//     honoured by the scanner but the flag-body branch is STUB (write
+//     reserved diagnostic + exit 0). RC_DRY_RUN emits an audit-INTENT
+//     record but no network I/O.
 //   - Response body > 4096 bytes. Single sys_recv into a 4 KiB
 //     scratch; a larger body is truncated to 4 KiB and the request
 //     succeeds with body_bytes = 4096 in the RESULT record. A
@@ -53,12 +82,16 @@
 //     the output includes the chunk-size lines. HTTP/1.0 in the
 //     request-line suppresses this in most stacks.
 //
-// CLI surface honoured at v1.3.0
+// CLI surface honoured at v1.4.0
 // ------------------------------
-//   pdxcurl [ -o | --output FILE ] [ -d | --data BODY ] <url>
+//   pdxcurl [ -o | --output FILE ] [ -d | --data BODY ]
+//           [ --trust=cap:<n> ] [ --audit-only ] <url>
 //
 // Positional <url> is REQUIRED; if absent (or if the scanner
 // completes without capturing one), exit EXIT_ARGV_USAGE (=2).
+// `--trust=cap:<n>` and `--audit-only` are each single-token flags
+// (no following argv slot consumed), unlike `-o`/`-d` which each
+// consume the NEXT argv slot as their value.
 //
 // Register plan (across the four phases of _start)
 // ------------------------------------------------
@@ -140,6 +173,12 @@ module Main = structure {
   pub let curl_msg_dry_run_stub      : [u8; 40] = "pdxcurl: --dry-run, no network I/O run\n\0"
   pub let curl_msg_dry_run_stub_len  : u64      = 39
 
+  pub let curl_msg_audit_only        : [u8; 47] = "pdxcurl: --audit-only, INTENT emitted, no I/O\n\0"
+  pub let curl_msg_audit_only_len    : u64      = 46
+
+  pub let curl_msg_tls_wrap_fail     : [u8; 26] = "pdxcurl: tls wrap failed\n\0"
+  pub let curl_msg_tls_wrap_fail_len : u64      = 25
+
   // ==================================================================
   // Fixed request-line + header fragments (assembled into curl_req_buf)
   // ==================================================================
@@ -166,15 +205,18 @@ module Main = structure {
   //   curl_clen_buf   -- decimal-encoded Content-Length ASCII (20 bytes:
   //                       max u64 = 20 digits).
   //   curl_argv_slots -- captured argv pointers from Phase A scan:
-  //                       [+0]  = url_ptr    (0 = unset)
-  //                       [+8]  = output_ptr (0 = stdout)
-  //                       [+16] = data_ptr   (0 = GET; nonzero = POST)
-  //                       [+24] = data_len   (u64; strlen at scan-time)
+  //                       [+0]  = url_ptr        (0 = unset)
+  //                       [+8]  = output_ptr     (0 = stdout)
+  //                       [+16] = data_ptr       (0 = GET; nonzero = POST)
+  //                       [+24] = data_len       (u64; strlen at scan-time)
+  //                       [+32] = trust_present  (0/1; pdxcurl#8 --trust=)
+  //                       [+40] = trust_cap_n    (u64; parsed cap:<n> value)
+  //                       [+48] = audit_only     (0/1; pdxcurl#11 --audit-only)
   // ==================================================================
   pub let mut curl_req_buf           : [u8; 2048] = uninit @align(8)
   pub let mut curl_resp_buf          : [u8; 4096] = uninit @align(8)
   pub let mut curl_clen_buf          : [u8; 24]   = uninit @align(8)
-  pub let mut curl_argv_slots        : [u8; 32]   = uninit @align(8)
+  pub let mut curl_argv_slots        : [u8; 56]   = uninit @align(8)
 
   // v1.1-B semantic-pipe record buffer + schema constants (pipe stream)
   pub let mut curl_record_buf        : [u8; 48]   = uninit @align(8)
@@ -192,7 +234,7 @@ module Main = structure {
     fn () -> unsafe {
       effects: {mem, sysreg},
       capabilities: {fs, sched, cap},
-      justification: "pdxcurl v1.3.0 REAL M2/M3 body (Wave CC: pdxcurl#4, #5, #6, #7, #9). Retires the v1.2.0 argv-refusing STUB entry with a real HTTP-only driver that (a) walks argv[1..argc-1] recognising -o/--output FILE and -d/--data BODY plus a single positional <url> (argc cap 32, one --output slot, one --data slot); (b) parses the URL inline via curl_url_parse_inline (http:// prefix + IPv4 dotted-decimal host [a.b.c.d, 0..255 each] + optional :PORT slug + optional /path slug), writing scheme/ip/port/host_ptr/host_len/path_ptr/path_len into the .bss slots UrlParse.curl_url_* declared in src/url_parse.pdx; a https:// URL is parsed to scheme=1 but the request-path branch jumps to curl_tls_not_yet (exit EXIT_TLS_HANDSHAKE_FAILED=9) since M3-001/pdxcurl#8 is not yet wired; a non-numeric host jumps to curl_url_bad (exit EXIT_ARGV_USAGE=2) since a user-space DNS syscall is not yet available; (c) emits an audit-INTENT HttpRequestRecord@0.1 record (schema 0x0100747541727543 = 'CurAut'+01, result_code=RC_INTENT=12, method_and_scheme filled from r14+scheme, all other numeric fields zero) via sys_semantic_send BEFORE the sys_socket call, satisfying pdxcurl#9 M3-002's INTENT-before-DNS requirement; (d) calls sys_socket(AF_INET=2, SOCK_STREAM=1, 0) and sys_connect(fd, ip, port) with the parsed peer coords, jumping to curl_socket_fail / curl_connect_fail on any negative return; (e) assembles the outbound HTTP request into curl_req_buf via inline byte-copy loops -- request line ('GET '/'POST ' + path + ' HTTP/1.0\\r\\n'), Host header ('Host: ' + host + '\\r\\n'), optionally Content-Length header ('Content-Length: ' + decimal-ASCII(data_len) + '\\r\\n') and the final terminating '\\r\\n', then the POST body when curl_argv_slots+16 != 0 -- with req_len (r12) tracking the total wire byte count; (f) sys_send(fd, curl_req_buf, req_len); (g) single sys_recv into curl_resp_buf (4 KiB cap; a truncated read is an honest MVP scope call per file header), r12 = bytes_recv'd; (h) parses HTTP status from response bytes [9..12] as three ASCII decimal digits (rejects anything not matching HTTP/1.X SSS shape via curl_bad_resp exit=EXIT_ARGV_USAGE), r13 = status; (i) scans response for the '\\r\\n\\r\\n' end-of-headers sentinel and reads back body_start_offset + body_len; (j) if curl_argv_slots+8 != 0 sys_open(path, O_CREAT|O_WRONLY|O_TRUNC=0xC1, mode=0644) for the output file (fd -> r15) else r15 = 1 (stdout); (k) sys_write(r15, body_ptr, body_len) then sys_close(r15) if r15 != 1 and always sys_close(socket_fd); (l) emits an audit-RESULT HttpRequestRecord@0.1 record with method_and_scheme + status + body_bytes filled in and result_code = RC_OK / RC_HTTP_4XX (status >= 400 && < 500) / RC_HTTP_5XX (status >= 500 && < 600); (m) emits the pipe HttpRequestRecord@0.1 record under schema 'HttpReq'+01 unchanged from v1.1-B shape (all fields now real, not just leading magic); (n) sys_exit with the design-doc §7 exit code -- 0 on 2xx, EXIT_HTTP_4XX=4 on 4xx, EXIT_HTTP_5XX=5 on 5xx. Every syscall failure has its own diagnostic on fd 2 and a distinct nonzero exit status (EXIT_CONN_REFUSED=7 for sys_connect fail, EXIT_ARGV_USAGE=2 for scanner refusal, EXIT_TLS_HANDSHAKE_FAILED=9 for https not-wired, etc.) and an audit-RESULT record with the matching RC_* result_code. The two audit records travel under distinct schema tags from the pipe record so a consumer parsing sys_semantic_send's ring by schema can dispatch cleanly. Register discipline: r12/r13/rbx/rbp/r14/r15 all callee-save; roles switch across the four phases (see file-header §Register plan). r12 and r13 flip from argc/argv (Phase A) to req_len (Phase C) to bytes_recv / status (Phase D). rbx flips from scan-cursor (Phase A) to port (Phase C). rbp holds ip u32 across Phase C/D. All state carried in callee-save registers survives every SYSCALL by the amd64 fast-syscall convention (rcx and r11 are SYSCALL-clobbered per that convention; the byte-copy inner loops use them for cursor scratch only, never reading them after a syscall). sys_semantic_send returns are intentionally discarded (marshalling errors are compile-time gated -- 48-byte record within [1,240] cap, static rip-relative record_ptr never fails user_ptr_ok). Encoder discipline: no `test rN, rN` (every zero-check is `cmp rN, 0`); no 2-op `imul r, imm` (decimal *10 is `shl rax, 3; add rax, r10; add rax, r10` per pdxsock_port_loop; decimal encode for Content-Length divides by 10 via `mov r10, 10; xor rdx, rdx; div r10` -- one-op div r64 is safe); byte loads use `xor rax, rax; mov_b rax, [ptr]`; module basename PascalCase (Main); every label prefixed `curl_`; every fingerprint string carries an explicit `_len` sibling. No `and r11, imm64`; every mask fits in imm32 (0xC1, 0xFF, 0xFFFF). Multi-line string literals absent -- every rodata literal is single-line. sys_open flags = 0x40 (O_CREAT) | 0x01 (O_WRONLY) | 0x80 (O_TRUNC) = 0xC1; vfs_open honours O_CREAT bit-6 for creation and ignores the access-mode bits at R16.M3 per src/kernel/core/fs/vfs_open.pdx header, so 0xC1 is a superset of the currently-honoured shape and a future O_WRONLY/O_TRUNC enforcement landing works as-is.",
+      justification: "pdxcurl v1.3.0 REAL M2/M3 body (Wave CC: pdxcurl#4, #5, #6, #7, #9). Retires the v1.2.0 argv-refusing STUB entry with a real HTTP-only driver that (a) walks argv[1..argc-1] recognising -o/--output FILE and -d/--data BODY plus a single positional <url> (argc cap 32, one --output slot, one --data slot); (b) parses the URL inline via curl_url_parse_inline (http:// prefix + IPv4 dotted-decimal host [a.b.c.d, 0..255 each] + optional :PORT slug + optional /path slug), writing scheme/ip/port/host_ptr/host_len/path_ptr/path_len into the .bss slots UrlParse.curl_url_* declared in src/url_parse.pdx; a https:// URL is parsed to scheme=1 but the request-path branch jumps to curl_tls_not_yet (exit EXIT_TLS_HANDSHAKE_FAILED=9) since M3-001/pdxcurl#8 is not yet wired; a non-numeric host jumps to curl_url_bad (exit EXIT_ARGV_USAGE=2) since a user-space DNS syscall is not yet available; (c) emits an audit-INTENT HttpRequestRecord@0.1 record (schema 0x0100747541727543 = 'CurAut'+01, result_code=RC_INTENT=12, method_and_scheme filled from r14+scheme, all other numeric fields zero) via sys_semantic_send BEFORE the sys_socket call, satisfying pdxcurl#9 M3-002's INTENT-before-DNS requirement; (d) calls sys_socket(AF_INET=2, SOCK_STREAM=1, 0) and sys_connect(fd, ip, port) with the parsed peer coords, jumping to curl_socket_fail / curl_connect_fail on any negative return; (e) assembles the outbound HTTP request into curl_req_buf via inline byte-copy loops -- request line ('GET '/'POST ' + path + ' HTTP/1.0\\r\\n'), Host header ('Host: ' + host + '\\r\\n'), optionally Content-Length header ('Content-Length: ' + decimal-ASCII(data_len) + '\\r\\n') and the final terminating '\\r\\n', then the POST body when curl_argv_slots+16 != 0 -- with req_len (r12) tracking the total wire byte count; (f) sys_send(fd, curl_req_buf, req_len); (g) single sys_recv into curl_resp_buf (4 KiB cap; a truncated read is an honest MVP scope call per file header), r12 = bytes_recv'd; (h) parses HTTP status from response bytes [9..12] as three ASCII decimal digits (rejects anything not matching HTTP/1.X SSS shape via curl_bad_resp exit=EXIT_ARGV_USAGE), r13 = status; (i) scans response for the '\\r\\n\\r\\n' end-of-headers sentinel and reads back body_start_offset + body_len; (j) if curl_argv_slots+8 != 0 sys_open(path, O_CREAT|O_WRONLY|O_TRUNC=0xC1, mode=0644) for the output file (fd -> r15) else r15 = 1 (stdout); (k) sys_write(r15, body_ptr, body_len) then sys_close(r15) if r15 != 1 and always sys_close(socket_fd); (l) emits an audit-RESULT HttpRequestRecord@0.1 record with method_and_scheme + status + body_bytes filled in and result_code = RC_OK / RC_HTTP_4XX (status >= 400 && < 500) / RC_HTTP_5XX (status >= 500 && < 600); (m) emits the pipe HttpRequestRecord@0.1 record under schema 'HttpReq'+01 unchanged from v1.1-B shape (all fields now real, not just leading magic); (n) sys_exit with the design-doc §7 exit code -- 0 on 2xx, EXIT_HTTP_4XX=4 on 4xx, EXIT_HTTP_5XX=5 on 5xx. Every syscall failure has its own diagnostic on fd 2 and a distinct nonzero exit status (EXIT_CONN_REFUSED=7 for sys_connect fail, EXIT_ARGV_USAGE=2 for scanner refusal, EXIT_TLS_HANDSHAKE_FAILED=9 for https not-wired, etc.) and an audit-RESULT record with the matching RC_* result_code. The two audit records travel under distinct schema tags from the pipe record so a consumer parsing sys_semantic_send's ring by schema can dispatch cleanly. Register discipline: r12/r13/rbx/rbp/r14/r15 all callee-save; roles switch across the four phases (see file-header §Register plan). r12 and r13 flip from argc/argv (Phase A) to req_len (Phase C) to bytes_recv / status (Phase D). rbx flips from scan-cursor (Phase A) to port (Phase C). rbp holds ip u32 across Phase C/D. All state carried in callee-save registers survives every SYSCALL by the amd64 fast-syscall convention (rcx and r11 are SYSCALL-clobbered per that convention; the byte-copy inner loops use them for cursor scratch only, never reading them after a syscall). sys_semantic_send returns are intentionally discarded (marshalling errors are compile-time gated -- 48-byte record within [1,240] cap, static rip-relative record_ptr never fails user_ptr_ok). Encoder discipline: no `test rN, rN` (every zero-check is `cmp rN, 0`); no 2-op `imul r, imm` (decimal *10 is `shl rax, 3; add rax, r10; add rax, r10` per pdxsock_port_loop; decimal encode for Content-Length divides by 10 via `mov r10, 10; xor rdx, rdx; div r10` -- one-op div r64 is safe); byte loads use `xor rax, rax; mov_b rax, [ptr]`; module basename PascalCase (Main); every label prefixed `curl_`; every fingerprint string carries an explicit `_len` sibling. No `and r11, imm64`; every mask fits in imm32 (0xC1, 0xFF, 0xFFFF). Multi-line string literals absent -- every rodata literal is single-line. sys_open flags = 0x40 (O_CREAT) | 0x01 (O_WRONLY) | 0x80 (O_TRUNC) = 0xC1; vfs_open honours O_CREAT bit-6 for creation and ignores the access-mode bits at R16.M3 per src/kernel/core/fs/vfs_open.pdx header, so 0xC1 is a superset of the currently-honoured shape and a future O_WRONLY/O_TRUNC enforcement landing works as-is. Wave HH (pdxcurl#8, pdxcurl#11) additions: Phase B.4 (at curl_url_parse_ok) checks curl_argv_slots+48 (audit_only, set by curl_take_audit on a bare `--audit-only` token) before the https/trust gate; when set it diverts to curl_audit_only_path, an INTENT-only terminal branch that determines method, marshals + emits the audit record (result_code=RC_AUDIT_ONLY=11) via sys_semantic_send, writes a fd-2 fingerprint, and sys_exits EXIT_SUCCESS_AUDIT_ONLY=200 without touching sys_socket/connect/send/recv or the semantic-pipe HRR emit. Phase B.4's https gate now requires curl_argv_slots+32 (trust_present, set by curl_take_trust from a `--trust=cap:<n>` token whose tail is parsed by TlsWire::tls_wire_parse_cap_uri in src/tls_wire.pdx) before letting an https:// URL past curl_url_parse_ok into curl_method_determine; Phase C.1.5, immediately after a successful sys_connect, then calls TlsWire::tls_wire_net_tls_wrap(sock_fd, trust_cap_n, host_ptr, host_len) -- a WEAK-stub function (this toolchain exposes no STB_WEAK binding, per libpdx-argv's version_backend.pdx precedent; see src/tls_wire.pdx header) that always returns 0 (success-passthrough), so the request proceeds unencrypted over the raw socket rather than performing a real handshake, and curl_tls_wrap_fail (RC_TLS_HANDSHAKE_FAILED=4 / EXIT_TLS_HANDSHAKE_FAILED=9) stays unreachable until a real net_tls_wrap lands at a future libpdx-net M5 unblock. https:// without a --trust= token is unchanged from v1.3.0 (curl_tls_not_yet, exit 9).",
       block: {
 
         // ============================================================
@@ -200,8 +242,9 @@ module Main = structure {
         // ============================================================
         // r12 = argc, r13 = argv base, rbx = cursor (starts at 1).
         // curl_argv_slots is written as we find slots.
-        //   +0  url_ptr, +8 output_ptr, +16 data_ptr, +24 data_len
-        // Zero the slots first (four u64 stores).
+        //   +0  url_ptr, +8 output_ptr, +16 data_ptr, +24 data_len,
+        //   +32 trust_present, +40 trust_cap_n, +48 audit_only
+        // Zero the slots first (seven u64 stores).
         mov r12, rdi;                              // argc
         mov r13, rsi;                              // argv
         lea r14, [rip + curl_argv_slots];
@@ -210,6 +253,9 @@ module Main = structure {
         mov [r14 + 8], rax;
         mov [r14 + 16], rax;
         mov [r14 + 24], rax;
+        mov [r14 + 32], rax;
+        mov [r14 + 40], rax;
+        mov [r14 + 48], rax;
 
         // Argc gate: minimum 2 (pdxcurl <url>); maximum 32.
         cmp r12, 2;
@@ -251,6 +297,10 @@ module Main = structure {
         je curl_flag_output_long;
         cmp rax, 0x64;                             // 'd' -> --data
         je curl_flag_data_long;
+        cmp rax, 0x74;                             // 't' -> --trust=
+        je curl_flag_trust_long;
+        cmp rax, 0x61;                             // 'a' -> --audit-only
+        je curl_flag_audit_long;
         jmp curl_usage;
 
       curl_flag_output_short:
@@ -360,6 +410,111 @@ module Main = structure {
         jmp curl_data_strlen_loop;
       curl_data_strlen_done:
         mov [r15 + 24], rcx;                       // slot[+24] = data_len
+        add rbx, 1;
+        jmp curl_scan_loop;
+
+      curl_flag_trust_long:
+        // "--trust=" -- confirm remaining bytes: 'r','u','s','t','='.
+        xor rax, rax;
+        mov_b rax, [r14 + 3];
+        cmp rax, 0x72;                             // 'r'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 4];
+        cmp rax, 0x75;                             // 'u'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 5];
+        cmp rax, 0x73;                             // 's'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 6];
+        cmp rax, 0x74;                             // 't'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 7];
+        cmp rax, 0x3d;                             // '='
+        jne curl_usage;
+        jmp curl_take_trust;
+
+      curl_take_trust:
+        // Single-token flag -- no following argv slot consumed. Refuse
+        // duplicate --trust=. Parse "cap:<n>" starting at r14+8 via
+        // TlsWire::tls_wire_parse_cap_uri (src/tls_wire.pdx, pdxcurl#8).
+        lea r15, [rip + curl_argv_slots];
+        mov r8, [r15 + 32];
+        cmp r8, 0;
+        jne curl_usage;
+        mov rdi, r14;
+        add rdi, 8;
+        call tls_wire_parse_cap_uri;
+        // rax == all-ones (u64::MAX) on malformed "cap:<n>" -- computed
+        // via xor+sub rather than a 64-bit immediate compare.
+        xor r9, r9;
+        sub r9, 1;                                 // r9 = 0xFFFF...FFFF
+        cmp rax, r9;
+        je curl_usage;
+        lea r15, [rip + curl_argv_slots];
+        mov [r15 + 40], rax;                       // trust_cap_n
+        mov r9, 1;
+        mov [r15 + 32], r9;                        // trust_present = 1
+        add rbx, 1;
+        jmp curl_scan_loop;
+
+      curl_flag_audit_long:
+        // "--audit-only" -- confirm remaining bytes:
+        // 'u','d','i','t','-','o','n','l','y','\0'.
+        xor rax, rax;
+        mov_b rax, [r14 + 3];
+        cmp rax, 0x75;                             // 'u'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 4];
+        cmp rax, 0x64;                             // 'd'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 5];
+        cmp rax, 0x69;                             // 'i'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 6];
+        cmp rax, 0x74;                             // 't'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 7];
+        cmp rax, 0x2d;                             // '-'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 8];
+        cmp rax, 0x6f;                             // 'o'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 9];
+        cmp rax, 0x6e;                             // 'n'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 10];
+        cmp rax, 0x6c;                             // 'l'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 11];
+        cmp rax, 0x79;                             // 'y'
+        jne curl_usage;
+        xor rax, rax;
+        mov_b rax, [r14 + 12];
+        cmp rax, 0;                                // '\0'
+        jne curl_usage;
+        jmp curl_take_audit;
+
+      curl_take_audit:
+        // Single-token flag -- no following argv slot consumed. Refuse
+        // duplicate --audit-only.
+        lea r15, [rip + curl_argv_slots];
+        mov r8, [r15 + 48];
+        cmp r8, 0;
+        jne curl_usage;
+        mov r9, 1;
+        mov [r15 + 48], r9;                        // audit_only = 1
         add rbx, 1;
         jmp curl_scan_loop;
 
@@ -596,11 +751,28 @@ module Main = structure {
         mov [rip + curl_url_path_len], r10;
 
       curl_url_parse_ok:
-        // https:// not wired.
+        // ============================================================
+        // Phase B.4: --audit-only short-circuit (pdxcurl#11, M3-004).
+        // Takes priority over the https/--trust= gate below: an
+        // audit-only run performs no network I/O regardless of scheme,
+        // so it needs no TLS trust resolution either.
+        // ============================================================
+        lea r15, [rip + curl_argv_slots];
+        mov r9, [r15 + 48];                        // audit_only flag
+        cmp r9, 0;
+        jne curl_audit_only_path;
+
+        // https:// requires a --trust=cap:<n> token (pdxcurl#8,
+        // M3-001); without one it still refuses at curl_tls_not_yet.
         mov r9, [rip + curl_url_scheme];
         cmp r9, 0;
-        jne curl_tls_not_yet;
+        je curl_method_determine;
+        lea r15, [rip + curl_argv_slots];
+        mov r8, [r15 + 32];                        // trust_present
+        cmp r8, 0;
+        je curl_tls_not_yet;
 
+      curl_method_determine:
         // ============================================================
         // Phase B.5: determine method (0=GET, 1=POST).
         // ============================================================
@@ -677,6 +849,24 @@ module Main = structure {
         syscall;
         cmp rax, 0;
         jl curl_connect_fail;
+
+        // ============================================================
+        // Phase C.1.5: TLS wrap (pdxcurl#8, M3-001). Only reached when
+        // scheme==1 (https), which by the Phase B.4 gate above implies
+        // trust_present==1 (curl_argv_slots+32 != 0).
+        // ============================================================
+        mov r9, [rip + curl_url_scheme];
+        cmp r9, 0;
+        je curl_after_tls_wrap;
+        lea r15, [rip + curl_argv_slots];
+        mov rdi, [rip + curl_sock_fd_slot];
+        mov rsi, [r15 + 40];                       // trust_cap_n
+        mov rdx, [rip + curl_url_host_ptr];
+        mov rcx, [rip + curl_url_host_len];
+        call tls_wire_net_tls_wrap;
+        cmp rax, 0;
+        jne curl_tls_wrap_fail;
+      curl_after_tls_wrap:
 
         // ============================================================
         // Phase C.2: assemble request into curl_req_buf.
@@ -1212,6 +1402,59 @@ module Main = structure {
         syscall;
         hlt;
 
+      curl_audit_only_path:
+        // ============================================================
+        // pdxcurl#11 M3-004: --audit-only INTENT-only terminal path.
+        // Reached from curl_url_parse_ok (Phase B.4) before any
+        // socket-family syscall. Determine method (needed for the
+        // record's method_and_scheme field), marshal + emit an INTENT
+        // record to the audit sink, write a human-readable fingerprint
+        // to fd 2, then sys_exit(EXIT_SUCCESS_AUDIT_ONLY=200). No TCP
+        // connect, no HTTP send/recv, no semantic-pipe HRR emit.
+        // ============================================================
+        lea r15, [rip + curl_argv_slots];
+        mov r8, [r15 + 16];                        // data_ptr
+        cmp r8, 0;
+        je curl_audit_only_method_get;
+        mov r14, 1;                                // method = POST
+        jmp curl_audit_only_method_done;
+      curl_audit_only_method_get:
+        xor r14, r14;                              // method = GET
+      curl_audit_only_method_done:
+
+        lea r15, [rip + curl_audit_record_buf];
+        mov rax, [rip + curl_hrr_magic];
+        mov [r15 + 0], rax;
+        mov rax, 1;                                // version=1, flags=0
+        mov [r15 + 8], rax;
+        mov rax, r14;
+        mov r9, [rip + curl_url_scheme];
+        shl r9, 8;
+        or rax, r9;
+        mov [r15 + 16], rax;
+        xor rax, rax;
+        mov [r15 + 24], rax;                       // body_bytes
+        mov [r15 + 32], rax;                       // redirect + header counts
+        mov rax, 11;                               // RC_AUDIT_ONLY
+        mov [r15 + 40], rax;
+
+        mov rdi, [rip + curl_schema_audit];
+        lea rsi, [rip + curl_audit_record_buf];
+        mov rdx, 48;
+        mov rax, 115;
+        syscall;
+
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_audit_only];
+        mov rdx, 46;                               // curl_msg_audit_only_len
+        mov rax, 1;
+        syscall;
+
+        mov rdi, 200;                              // EXIT_SUCCESS_AUDIT_ONLY
+        mov rax, 60;
+        syscall;
+        hlt;
+
       curl_tls_not_yet:
         mov rdi, 2;
         lea rsi, [rip + curl_msg_tls_not_yet];
@@ -1282,6 +1525,41 @@ module Main = structure {
         mov rax, 115;
         syscall;
         mov rdi, 7;                                // EXIT_CONN_REFUSED
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      curl_tls_wrap_fail:
+        // pdxcurl#8 M3-001: tls_wire_net_tls_wrap returned nonzero.
+        // Unreachable while TlsWire::net_tls_wrap stays a WEAK-stub
+        // passthrough (always returns 0); wired for when a real
+        // libpdx-net M5 landing swaps that stub for a real handshake.
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_tls_wrap_fail];
+        mov rdx, 25;                               // curl_msg_tls_wrap_fail_len
+        mov rax, 1;
+        syscall;
+        lea r15, [rip + curl_audit_record_buf];
+        mov rax, [rip + curl_hrr_magic];
+        mov [r15 + 0], rax;
+        mov rax, 1;
+        mov [r15 + 8], rax;
+        mov rax, r14;
+        mov r10, [rip + curl_url_scheme];
+        shl r10, 8;
+        or rax, r10;
+        mov [r15 + 16], rax;
+        xor rax, rax;
+        mov [r15 + 24], rax;
+        mov [r15 + 32], rax;
+        mov rax, 4;                                // RC_TLS_HANDSHAKE_FAILED
+        mov [r15 + 40], rax;
+        mov rdi, [rip + curl_schema_audit];
+        lea rsi, [rip + curl_audit_record_buf];
+        mov rdx, 48;
+        mov rax, 115;
+        syscall;
+        mov rdi, 9;                                // EXIT_TLS_HANDSHAKE_FAILED
         mov rax, 60;
         syscall;
         hlt;

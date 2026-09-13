@@ -22,10 +22,20 @@
 # Kind rationale:
 #   KIND_USER          -- invoker attribution (audit record identity);
 #                         every satellite in the R100 wave lists this.
-#   KIND_TLS_TRUST     -- optional at v1.1.0 (no https body wired);
-#                         mandatory once M3-001 (pdxcurl#8) lands the
-#                         --trust= cap resolution + net_tls_wrap call.
-#                         Placeholder 0x1A7 per parent plan §12.3.
+#   KIND_TLS_TRUST     -- optional. v1.4.0 (Wave HH, pdxcurl#8) lands
+#                         the --trust=cap:<n> argv gate + a WEAK-stub
+#                         net_tls_wrap call (src/tls_wire.pdx), but
+#                         <n> is stored as an opaque u64 and never
+#                         resolved against a live capability table --
+#                         pdxtrust M1 (cap mint) and libpdx-net M5
+#                         (real handshake) are still both UNAVAILABLE
+#                         per STATUS.md. Stays optional until a real
+#                         enforcement point exists; promoting it to
+#                         mandatory ahead of that would refuse every
+#                         https:// invocation for a claim this landing
+#                         cannot back up. Placeholder 0x1A7 per parent
+#                         plan §12.3 (mirrored as TlsWire::KIND_TLS_
+#                         TRUST, documentation-only).
 #   KIND_IPC_ENDPOINT  -- optional; documentation-only at v1.1-B.
 #                         The v1.1-B semantic-pipe emission wire
 #                         uses sys_semantic_send (SC+ ID 115) which
@@ -37,5 +47,5 @@
 #                         request at v1.
 
 !KIND_USER               0x001   # invoker attribution (audit)
- KIND_TLS_TRUST          0x001   # optional -- v1.1.0 stub; M3-001 (pdxcurl#8) real
+ KIND_TLS_TRUST          0x001   # optional -- v1.4.0 wires --trust=cap:<n> + a WEAK-stub net_tls_wrap
  KIND_IPC_ENDPOINT       0x001   # optional -- documentation-only (see above)

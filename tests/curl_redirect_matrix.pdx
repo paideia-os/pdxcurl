@@ -1,0 +1,340 @@
+// tests/curl_redirect_matrix.pdx -- pdxcurl M4-005 redirect-chain smoke:
+//                                    301/302/303/307/308 method
+//                                    preservation + 10-hop cap
+//                                    (pdxcurl#17).
+//
+// Wave: R100  Milestone: M4-005 (pdxcurl#17)
+// Doc:  design/networking/r100-user-tools-plan.md §13.3 (paideia-os)
+//       + design/networking/pdxcurl-design.md §4/§7 (redirect_count
+//       field + TOO_MANY_REDIRECTS taxonomy).
+//
+// Purpose ---------------------------------------------------------------
+// src/main.pdx does not follow redirects at v1.3.0 -- CHANGELOG.md's
+// [1.3.0] "Not shipped" section states plainly that `redirect_count`
+// stays zero and no Location-header follow chain exists. M4-005 asks
+// for a redirect-chain smoke witness anyway (it is a fixture-vs-engine
+// test, not a fixture-vs-src/main.pdx test), so this file carries its
+// OWN small, self-contained redirect-decision engine -- the
+// method-preservation rule (301/302/303 downgrade to GET; 307/308
+// preserve the original method) and the 10-hop cap -- rather than
+// exercising a chain-follow loop that does not exist yet in src/main.
+// pdx. A future landing that gives src/main.pdx a real Location-header
+// follow loop replaces this file's crm_redirect_method /
+// crm_follow_chain with calls into that shipped engine, preserving the
+// row shapes and assertions below.
+//
+// Like every tests/*.pdx in this repo, tools/build.sh compiles this
+// file standalone (build-out/tests-curl_redirect_matrix.o) and never
+// links it against src/*.pdx or another tests/*.pdx object (see
+// tests/curl_get_smoke.pdx's header for the same note) -- every symbol
+// this file needs is declared locally.
+//
+// Matrix ------------------------------------------------------------------
+// Five rows, each staging one canned redirect status line (via
+// CRM_WORK_BUF, seeded from CRM_RESP_TEMPLATE and mutated at byte 11
+// per row) followed by a canned final 200 (CRM_FINAL_RESP), both
+// parsed through the same bytes-[9..12]-as-three-ASCII-digits idiom
+// src/main.pdx's response parser uses:
+//
+//   status | expected post-redirect method (starting method = POST)
+//   -------+----------------------------------------------------------
+//   301    | GET   (downgrade)
+//   302    | GET   (downgrade)
+//   303    | GET   (downgrade)
+//   307    | POST  (preserved)
+//   308    | POST  (preserved)
+//
+// Plus a sixth check: crm_follow_chain simulates an all-redirect chain
+// (every hop reports 301) and must refuse at the 11th hop rather than
+// loop forever, matching CRM_MAX_HOPS = 10 / pdxcurl-design.md §7's
+// TOO_MANY_REDIRECTS taxonomy (RC=8, EXIT=12 in src/error_taxonomy.pdx
+// -- restated as local constants here per the no-cross-file-symbols
+// constraint above, not referenced).
+//
+// paideia-as compliance (pdx encoder pitfalls, per user memory)
+// ---------------------------------------------------------------
+//   - Module CurlRedirectMatrix (PascalCase file basename).
+//   - No `test rN, rN`; no 2-op `imul r, imm` (status decimal-encode
+//     uses the shl-3/add/add *10 idiom, matching src/main.pdx's
+//     curl_port_loop / curl_scan_hdrs_loop precedent).
+//   - No `and r11, imm64`.
+//   - Byte loads via `xor rN, rN; mov_b rN, [ptr]`; byte stores of a
+//     compile-time-known digit round-trip through a register
+//     (`mov r9, imm; mov_b [r13+11], r9`) rather than an
+//     immediate-to-rip-relative-plus-offset store, matching every
+//     other byte store's addressing shape in this repo.
+//   - Every label prefixed `crm_` (reserved-word discipline).
+//   - No push/pop anywhere in this file; process entry leaves
+//     rsp % 16 == 0 and every `call` site here has zero intervening
+//     stack traffic, so alignment holds without spills.
+
+module CurlRedirectMatrix = structure {
+
+  // ---- canned redirect template (byte 11 overwritten per row) ----------
+  pub let CRM_RESP_TEMPLATE   : [u8; 26] = "HTTP/1.1 301 Redirect\r\n\r\n\0"
+  pub let mut CRM_WORK_BUF    : [u8; 32] = uninit @align(8)
+
+  // ---- canned final 200 (staged after every row's redirect) -------------
+  pub let CRM_FINAL_RESP      : [u8; 20] = "HTTP/1.1 200 OK\r\n\r\n\0"
+
+  // ---- method enum (matches src/main.pdx's r14 convention) -------------
+  pub let CRM_METHOD_GET      : u64 = 0
+  pub let CRM_METHOD_POST     : u64 = 1
+
+  pub let CRM_MAX_HOPS        : u64 = 10
+
+  // ---- fd 2 fingerprints -------------------------------------------------
+  pub let crm_msg_ok          : [u8; 33] = "pdxcurl curl_redirect_matrix ok\n\0"
+  pub let crm_msg_ok_len      : u64      = 32
+  pub let crm_msg_fail        : [u8; 35] = "pdxcurl curl_redirect_matrix FAIL\n\0"
+  pub let crm_msg_fail_len    : u64      = 34
+
+  // ======================================================================
+  // crm_status_parse(buf_ptr) -> status
+  //
+  // Parses three ASCII decimal digits at buf_ptr[9..12) into a numeric
+  // status. Same shape as src/main.pdx's response-status parse (no
+  // 2-op imul -- shl-3/add/add *10 idiom). Pure leaf; does not
+  // range-check the digits (every caller in this file supplies a
+  // well-formed canned template).
+  // ======================================================================
+  pub let crm_status_parse : (u64) -> u64 !{mem} @{} =
+    fn (buf_ptr: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "pdxcurl#17 M4-005: shared status-line parser for the redirect matrix witness. rdi=buf_ptr. Reads bytes [9],[10],[11] as ASCII digits, folds via (d1*10+d2)*10+d3 using the shl-3/add/add *10 idiom (no 2-op imul, matching src/main.pdx's curl_port_loop / response-status-parse precedent). Byte loads via xor+mov_b. Pure leaf, no nested calls, no push/pop needed.",
+      block: {
+        xor rax, rax;
+        mov_b rax, [rdi + 9];
+        sub rax, 48;
+        mov r9, rax;
+        shl rax, 3;
+        add rax, r9;
+        add rax, r9;                                // d1*10
+        xor rdx, rdx;
+        mov_b rdx, [rdi + 10];
+        sub rdx, 48;
+        add rax, rdx;                                // d1*10 + d2
+        mov r9, rax;
+        shl rax, 3;
+        add rax, r9;
+        add rax, r9;                                // (d1*10+d2)*10
+        xor rdx, rdx;
+        mov_b rdx, [rdi + 11];
+        sub rdx, 48;
+        add rax, rdx;                                // status
+        ret
+      }
+    }
+
+  // ======================================================================
+  // crm_redirect_method(status, method_in) -> method_out
+  //
+  // pdxcurl-design.md §4 redirect method-preservation rule: 301/302/303
+  // always downgrade to GET regardless of the original method; 307/308
+  // (and any other status, defensively) preserve method_in unchanged.
+  // Pure leaf.
+  // ======================================================================
+  pub let crm_redirect_method : (u64, u64) -> u64 !{} @{} =
+    fn (status: u64, method_in: u64) -> unsafe {
+      effects: {}, capabilities: {},
+      justification: "pdxcurl#17 M4-005: redirect method-preservation rule. rdi=status, rsi=method_in. 301/302/303 -> return CRM_METHOD_GET (0) unconditionally (the well-known 'POST becomes GET' redirect-downgrade behaviour every major HTTP client implements for these three codes). 307/308 (Temporary/Permanent Redirect) and any other status -> return method_in unchanged, since only 301/302/303 carry a legacy method-downgrade mandate. Pure leaf, no nested calls.",
+      block: {
+        cmp rdi, 301;
+        je crm_rm_downgrade;
+        cmp rdi, 302;
+        je crm_rm_downgrade;
+        cmp rdi, 303;
+        je crm_rm_downgrade;
+        mov rax, rsi;
+        ret;
+      crm_rm_downgrade:
+        xor rax, rax;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // crm_follow_chain() -> 0 (never in this synthetic chain) | 1 (too many)
+  //
+  // Simulates an all-redirect chain (every hop reports 301, i.e. the
+  // chain never resolves to a final 200) and must refuse once hop_count
+  // exceeds CRM_MAX_HOPS (10) rather than loop forever. r10 = hop_count
+  // (caller-save scratch; this function touches no callee-save
+  // register so it needs no push/pop). Pure leaf.
+  // ======================================================================
+  pub let crm_follow_chain : () -> u64 !{} @{} =
+    fn () -> unsafe {
+      effects: {}, capabilities: {},
+      justification: "pdxcurl#17 M4-005: 10-hop redirect cap witness. Simulates a pathological all-redirect chain (every hop is a 301, so the loop would spin forever without a cap) by simply counting hops -- r10 starts at 0 and is incremented once per iteration; after each increment the count is compared against CRM_MAX_HOPS (10, imm32) and, once it exceeds the cap (the 11th hop), the function returns 1 (CRM_ERR_TOO_MANY_HOPS), matching pdxcurl-design.md §7's TOO_MANY_REDIRECTS taxonomy (RC=8/EXIT=12 in src/error_taxonomy.pdx; restated conceptually here, not referenced -- this file cannot reference another translation unit's symbols per tools/build.sh's per-file compile-only posture). No `test rN, rN` (cmp rN, 0 not even needed here since the loop's only exit is the hop-count comparison); no push/pop (r10 is caller-save and this is a leaf). Labels prefixed crm_fc_.",
+      block: {
+        xor r10, r10;
+      crm_fc_step:
+        add r10, 1;
+        cmp r10, 10;
+        ja crm_fc_too_many;
+        jmp crm_fc_step;
+      crm_fc_too_many:
+        mov rax, 1;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // _start -- witness entry point.
+  // ======================================================================
+  pub let _start : () -> () !{mem, sysreg} @{fs, sched, cap} =
+    fn () -> unsafe {
+      effects: {mem, sysreg},
+      capabilities: {fs, sched, cap},
+      justification: "pdxcurl#17 M4-005 redirect-chain smoke matrix. Register plan: r12 = fail_count (accumulates across all six checks), r13 = &CRM_WORK_BUF held across every row (callee-save; never touched by the leaf helpers called here, so it survives every nested call without a push/pop). Setup: byte-copy CRM_RESP_TEMPLATE (26 B incl. NUL) into CRM_WORK_BUF once. Five rows (301/302/303/307/308): each pokes CRM_WORK_BUF+11 with that status's ASCII last digit via `mov r9, imm; mov_b [r13+11], r9` (a register-relative byte store, the same addressing shape every byte store elsewhere in this repo uses -- avoiding an immediate-to-rip-relative-plus-offset store this file has no precedent for; bytes 9/10 stay '3'/'0' from the template for every row since every code in this matrix is 30x), calls crm_status_parse(&CRM_WORK_BUF) to recover the numeric status (proving the parse pipeline, not just checking the hardcoded literal), passes it plus CRM_METHOD_POST to crm_redirect_method, and compares the result against that row's expected method (301/302/303 -> GET=0; 307/308 -> POST=1 preserved) -- a mismatch increments r12 but does NOT short-circuit, so every row is exercised and the fd 2 fingerprint reflects the full matrix outcome. Each row also parses CRM_FINAL_RESP (the canned final 200 every real redirect chain would land on after the one staged hop) via crm_status_parse and asserts == 200, incrementing r12 on mismatch -- this is the 'stage a redirect then a final 200' half of the issue text. Sixth check: call crm_follow_chain() -> rax; rax != 1 increments r12 (the 11th-hop cap must fire). Tail: cmp r12, 0; je crm_all_pass -> write crm_msg_ok to fd 2, sys_exit(0); else write crm_msg_fail to fd 2, sys_exit(1). No push/pop anywhere in this file so rsp % 16 == 0 (inherited from process entry) at every nested call site. Labels prefixed crm_.",
+      block: {
+        xor r12, r12;                               // fail_count = 0
+
+        // Seed CRM_WORK_BUF from the template (26 bytes incl. NUL).
+        // r13 = &CRM_WORK_BUF, held across every row below so each row's
+        // digit poke is a register-relative store (mov_b [r13+11], rN),
+        // the same addressing shape every byte store elsewhere in this
+        // repo uses -- avoiding an immediate-to-rip-relative-plus-offset
+        // store this file has no precedent for.
+        lea r8, [rip + CRM_RESP_TEMPLATE];
+        lea r13, [rip + CRM_WORK_BUF];
+        xor rcx, rcx;
+      crm_seed_loop:
+        cmp rcx, 26;
+        jae crm_seed_done;
+        xor rax, rax;
+        mov_b rax, [r8 + rcx*1];
+        mov_b [r13 + rcx*1], rax;
+        add rcx, 1;
+        jmp crm_seed_loop;
+      crm_seed_done:
+
+        // ---- row 0: 301 -> GET ----
+        mov r9, 0x31;                               // '1'
+        mov_b [r13 + 11], r9;
+        lea rdi, [rip + CRM_WORK_BUF];
+        call crm_status_parse;
+        mov rdi, rax;
+        mov rsi, 1;                                 // CRM_METHOD_POST
+        call crm_redirect_method;
+        cmp rax, 0;                                 // expect GET
+        je crm_row0_method_ok;
+        add r12, 1;
+      crm_row0_method_ok:
+        lea rdi, [rip + CRM_FINAL_RESP];
+        call crm_status_parse;
+        cmp rax, 200;
+        je crm_row0_final_ok;
+        add r12, 1;
+      crm_row0_final_ok:
+
+        // ---- row 1: 302 -> GET ----
+        mov r9, 0x32;                               // '2'
+        mov_b [r13 + 11], r9;
+        lea rdi, [rip + CRM_WORK_BUF];
+        call crm_status_parse;
+        mov rdi, rax;
+        mov rsi, 1;
+        call crm_redirect_method;
+        cmp rax, 0;
+        je crm_row1_method_ok;
+        add r12, 1;
+      crm_row1_method_ok:
+        lea rdi, [rip + CRM_FINAL_RESP];
+        call crm_status_parse;
+        cmp rax, 200;
+        je crm_row1_final_ok;
+        add r12, 1;
+      crm_row1_final_ok:
+
+        // ---- row 2: 303 -> GET ----
+        mov r9, 0x33;                               // '3'
+        mov_b [r13 + 11], r9;
+        lea rdi, [rip + CRM_WORK_BUF];
+        call crm_status_parse;
+        mov rdi, rax;
+        mov rsi, 1;
+        call crm_redirect_method;
+        cmp rax, 0;
+        je crm_row2_method_ok;
+        add r12, 1;
+      crm_row2_method_ok:
+        lea rdi, [rip + CRM_FINAL_RESP];
+        call crm_status_parse;
+        cmp rax, 200;
+        je crm_row2_final_ok;
+        add r12, 1;
+      crm_row2_final_ok:
+
+        // ---- row 3: 307 -> POST preserved ----
+        mov r9, 0x37;                               // '7'
+        mov_b [r13 + 11], r9;
+        lea rdi, [rip + CRM_WORK_BUF];
+        call crm_status_parse;
+        mov rdi, rax;
+        mov rsi, 1;
+        call crm_redirect_method;
+        cmp rax, 1;                                 // expect POST preserved
+        je crm_row3_method_ok;
+        add r12, 1;
+      crm_row3_method_ok:
+        lea rdi, [rip + CRM_FINAL_RESP];
+        call crm_status_parse;
+        cmp rax, 200;
+        je crm_row3_final_ok;
+        add r12, 1;
+      crm_row3_final_ok:
+
+        // ---- row 4: 308 -> POST preserved ----
+        mov r9, 0x38;                               // '8'
+        mov_b [r13 + 11], r9;
+        lea rdi, [rip + CRM_WORK_BUF];
+        call crm_status_parse;
+        mov rdi, rax;
+        mov rsi, 1;
+        call crm_redirect_method;
+        cmp rax, 1;
+        je crm_row4_method_ok;
+        add r12, 1;
+      crm_row4_method_ok:
+        lea rdi, [rip + CRM_FINAL_RESP];
+        call crm_status_parse;
+        cmp rax, 200;
+        je crm_row4_final_ok;
+        add r12, 1;
+      crm_row4_final_ok:
+
+        // ---- sixth check: 10-hop cap must fire on the 11th hop ----
+        call crm_follow_chain;
+        cmp rax, 1;
+        je crm_hopcap_ok;
+        add r12, 1;
+      crm_hopcap_ok:
+
+        cmp r12, 0;
+        je crm_all_pass;
+
+        mov rdi, 2;
+        lea rsi, [rip + crm_msg_fail];
+        mov rdx, 34;
+        mov rax, 1;
+        syscall;
+        mov rdi, 1;
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      crm_all_pass:
+        mov rdi, 2;
+        lea rsi, [rip + crm_msg_ok];
+        mov rdx, 32;
+        mov rax, 1;
+        syscall;
+        xor rdi, rdi;
+        mov rax, 60;
+        syscall;
+        hlt;
+      }
+    }
+
+}

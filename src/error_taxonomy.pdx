@@ -44,17 +44,23 @@
 //
 // Exit code (POSIX u8) -- matches design-doc §7
 // ---------------------------------------------
-//   0  = OK / DRY_RUN / AUDIT_ONLY (success surfaces converge)
-//   2  = argv usage error         (missing <url>, bad flag)
-//   3  = caps refusal             (NO_PERMISSION)
-//   4  = HTTP 4xx                 (response 400..499)
-//   5  = HTTP 5xx                 (response 500..599)
-//   6  = DNS NXDOMAIN / SERVFAIL
-//   7  = TCP connection refused
-//   8  = TLS key mismatch / SPKI pin fail
-//   9  = TLS handshake failure    (proto / cipher)
-//  11  = timeout                  (connect / read / total)
-//  12  = too many redirects
+//   0   = OK / DRY_RUN             (success surfaces converge)
+//   2   = argv usage error         (missing <url>, bad flag)
+//   3   = caps refusal             (NO_PERMISSION)
+//   4   = HTTP 4xx                 (response 400..499)
+//   5   = HTTP 5xx                 (response 500..599)
+//   6   = DNS NXDOMAIN / SERVFAIL
+//   7   = TCP connection refused
+//   8   = TLS key mismatch / SPKI pin fail
+//   9   = TLS handshake failure    (proto / cipher)
+//  11   = timeout                  (connect / read / total)
+//  12   = too many redirects
+//  200  = AUDIT_ONLY success       (pdxcurl#11, M3-004: deliberately
+//                                    DISTINCT from the ordinary 0 exit
+//                                    so a caller can tell an
+//                                    audit-only run apart from a
+//                                    completed request without parsing
+//                                    the audit stream)
 //
 // paideia-as compliance
 // ---------------------
@@ -98,5 +104,6 @@ module ErrorTaxonomy = structure {
   pub let EXIT_TLS_HANDSHAKE_FAILED  : u64 = 9
   pub let EXIT_TIMEOUT               : u64 = 11
   pub let EXIT_TOO_MANY_REDIRECTS    : u64 = 12
+  pub let EXIT_SUCCESS_AUDIT_ONLY    : u64 = 200
 
 }

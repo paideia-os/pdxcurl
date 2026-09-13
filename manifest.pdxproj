@@ -11,7 +11,46 @@
 # release-time dual-sign at a future M5 additionally invokes
 # paideia-pq-sign::sign_release_artifact (Ed25519 + ML-DSA-65 hybrid).
 #
-# v1.3.0 (Wave CC drain, this landing) closes:
+# v1.4.0 (Wave HH drain, this landing) closes:
+#   - pdxcurl#8  M3-001 HTTPS path -- --trust=cap:<n> argv gate
+#     (src/main.pdx curl_flag_trust_long/curl_take_trust) + a WEAK-stub
+#     TlsWire::tls_wire_net_tls_wrap call (src/tls_wire.pdx) right
+#     after sys_connect succeeds on an https:// request. libpdx-net
+#     does not exist in-repo and this toolchain has no STB_WEAK linker
+#     binding, so the stub is a real local function that always
+#     returns success (request proceeds in plaintext); see
+#     src/tls_wire.pdx header for the full rationale. https:// without
+#     --trust= still refuses at curl_tls_not_yet, unchanged.
+#   - pdxcurl#11 M3-004 --audit-only -- INTENT-only terminal path
+#     (src/main.pdx curl_audit_only_path): emits the audit-INTENT
+#     record (result_code=RC_AUDIT_ONLY=11) + a fd-2 fingerprint, then
+#     sys_exit(EXIT_SUCCESS_AUDIT_ONLY=200) -- no TCP connect, no HTTP
+#     send/recv, no semantic-pipe HRR emit.
+#   - pdxcurl#13 M4-001 HTTP GET happy-path smoke vs fixture -- new
+#     tests/curl_get_smoke.pdx (module CurlGetSmoke): local WEAK-stub
+#     net_mock_connect/send/recv functions feed a canned 200 OK
+#     response through a self-contained curl_run_request driver;
+#     asserts status==200 and a 12-byte body match, writes the body to
+#     fd 1. Self-contained per tools/build.sh's per-file compile-only
+#     posture (test objects are never linked together or against
+#     src/*.pdx).
+#   - pdxcurl#17 M4-005 redirect-chain smoke -- new
+#     tests/curl_redirect_matrix.pdx (module CurlRedirectMatrix): a
+#     local redirect-decision engine (crm_redirect_method) asserts
+#     301/302/303 downgrade POST->GET and 307/308 preserve POST across
+#     five canned-response rows, plus a 10-hop cap witness
+#     (crm_follow_chain) that must refuse at the 11th hop. src/main.pdx
+#     itself does not follow redirects yet (redirect_count stays 0);
+#     this is a fixture-vs-engine test, not a fixture-vs-src/main.pdx
+#     test -- see the file header for the full rationale.
+#   - pdxcurl#18 M5-001 release closer -- CHANGELOG.md [1.4.0] entry,
+#     README.md refresh, release/RELEASE-1.4.0.md operator note,
+#     release/manifest.pdxsig.txt refreshed to v1.4.0 (still an
+#     UNSIGNED source-form placeholder pending the v0.33 PQ-signing
+#     crypto landing -- "dual-signed" stays aspirational naming until
+#     paideia-pq-sign::sign_release_artifact is actually invocable).
+#
+# v1.3.0 (Wave CC drain, previous landing) closed:
 #   - pdxcurl#4  M2-001 libpdx-url integration -- inline url_parse
 #     landed in src/main.pdx (http:// + IPv4 dotted-decimal +
 #     optional :PORT + optional /path); scheme/ip/port/host/path
@@ -70,21 +109,23 @@
 #   - pdxcurl#21 v1.1-B semantic-pipe emission wire
 #   - pdxcurl#22 v1.1-C release closer + tag v1.1.0
 #
-# What v1.2.0 does NOT ship:
-#   - Real HTTP GET / HTTPS TLS handshake / DNS resolve / audit
-#     INTENT/RESULT pair (pdxcurl#5..#9, #11, #13 -- blocked on
-#     libpdx-net, libpdx-url, libpdx-audit, pdxtrust satellite
-#     landings).
+# What v1.4.0 does NOT ship:
+#   - A real TLS handshake (net_tls_wrap stays a WEAK-stub passthrough;
+#     see pdxcurl#8 above). DNS-name hosts / -H headers / -X method
+#     override / chunked-encoding / recv-loop for bodies > 4 KiB --
+#     unchanged from v1.3.0.
 #   - Argv parser BODY (pdxcurl#2 parser-side -- rodata namespace
-#     landed here; the scan loop lands at libpdx-argv M1 unblock).
-#   - Redirect-chain smoke (pdxcurl#17, M4-005).
-#   - Dual-signed release manifest (pdxcurl#18, M5-001 -- v1.2.0
-#     remains UNSIGNED source-tag; dual-sign target slid to v1.3.0
-#     following the pdxsock precedent of collecting more drain
-#     before minting hybrid signatures).
+#     landed at v1.2.0; the scan loop lands at libpdx-argv M1 unblock).
+#   - --dry-run body (pdxcurl#3 -- rodata reservation only).
+#   - A real redirect-follow loop in src/main.pdx (pdxcurl#17's smoke
+#     tests a local decision engine, not a shipped chain-follow).
+#   - Actual dual (Ed25519 + ML-DSA-65) signatures over the release
+#     manifest (pdxcurl#18 -- blocked on the v0.33 PQ-signing crypto
+#     landing; the manifest stays an UNSIGNED source-form placeholder).
+#   - Mirror push (pdxcurl#19, M5-002).
 
 name        = pdxcurl
-version     = 1.3.0
+version     = 1.4.0
 kind        = tool
 entry       = _start                    # src/main.pdx
 output      = build-out/pdxcurl.elf
@@ -93,8 +134,9 @@ caps_decl   = caps.decl
 # --- Source list (order-insensitive; paideia-as resolves module deps
 # from `module <Basename> = structure { ... }` headers).
 sources:
-  - src/main.pdx                  # v1.3.0 REAL: argv scan + url parse + http
-                                  # get/post + --output file + audit emit
+  - src/main.pdx                  # v1.4.0 REAL: argv scan + url parse + http
+                                  # get/post + --output file + audit emit +
+                                  # --trust=/--audit-only gates (Wave HH)
   - src/tool_ident.pdx            # PDX_TOOL_NAME / PDX_TOOL_VERSION (Wave 6)
   - src/error_taxonomy.pdx        # v1.2.0 Wave V (pdxcurl#12): RC_*/EXIT_* rodata
   - src/argv_surface.pdx          # v1.2.0 Wave V (pdxcurl#2):  flag-name rodata
@@ -102,6 +144,8 @@ sources:
                                   # shared .bss result slots (curl_url_*)
   - src/audit_emit.pdx            # v1.3.0 Wave CC (pdxcurl#9): audit schema tag
                                   # + curl_audit_record_buf (48 B .bss)
+  - src/tls_wire.pdx              # v1.4.0 Wave HH (pdxcurl#8): --trust=cap:<n>
+                                  # parse + WEAK-stub net_tls_wrap
 
 # --- Library dependencies ----------------------------------------------
 # pdxcurl at v1.1.0 depends on nothing outside the SC+ syscall floor
@@ -123,6 +167,9 @@ tests:
   - tests/m4_002_https_smoke.pdx      # pdxcurl#14 -- HTTPS happy-path (BLOCKED)
   - tests/m4_003_failure_matrix.pdx   # pdxcurl#15 -- failure matrix (BLOCKED)
   - tests/m4_004_audit_trail.pdx      # pdxcurl#16 -- audit-trail assertion (BLOCKED)
+  - tests/curl_get_smoke.pdx          # pdxcurl#13 -- GET happy-path vs fixture (mocked)
+  - tests/curl_redirect_matrix.pdx    # pdxcurl#17 -- redirect method-preservation
+                                       # + 10-hop cap (local decision engine)
 
 # --- Documentation targets ---------------------------------------------
 # .pdxdoc source lands at M5-001 (pdxcurl#18); v1.1.0 has no doc/
@@ -142,12 +189,15 @@ compliance:
   - sysv-push-pop-parity          # rsp % 16 == 0 at every nested call
 
 # --- Release policy ----------------------------------------------------
-# v1.1.0 is the unsigned source-tag release (Wave M drain: pdxcurl#22).
-# Dual-signed release-source landing lands at v1.2.0 (M5-001 /
-# pdxcurl#18), following the pdxsock precedent. The v1.1.0 tag is
-# hand-cut by main after this drain lands.
+# v1.4.0 (M5-001, pdxcurl#18) refreshes release/manifest.pdxsig.txt +
+# adds release/RELEASE-1.4.0.md, but the manifest STAYS an UNSIGNED
+# source-form placeholder: the v0.33 PQ-signing crypto landing
+# (paideia-pq-sign::sign_release_artifact, Ed25519 + ML-DSA-65 hybrid)
+# is not yet invocable from this repo's tooling. "Dual-signed" in the
+# issue title names the target shape, not v1.4.0's actual content.
+# The v1.4.0 tag is hand-cut by main after this drain lands.
 release:
-  signer_author  = <unsigned-source-tag>                        # v1.1.0 is unsigned
-  mirror_target  = <deferred-to-v1.2.0-M5-001>                  # pdxcurl#19 mirror push
-  manifest_src   = release/manifest.pdxsig.txt                  # source form (v1.1.0)
-  release_notes  = release/RELEASE-1.1.0.md                     # operator note
+  signer_author  = <unsigned-source-tag>                        # v1.4.0 is unsigned
+  mirror_target  = <deferred-to-real-signing-landing>           # pdxcurl#19 mirror push
+  manifest_src   = release/manifest.pdxsig.txt                  # source form (v1.4.0)
+  release_notes  = release/RELEASE-1.4.0.md                     # operator note

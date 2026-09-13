@@ -21,7 +21,134 @@ Version discipline:
              --data / POST body (pdxcurl#7), libpdx-audit INTENT +
              RESULT record pair (pdxcurl#9). M5-001 dual-signed
              release-source landing slides one more minor.
+  v1.4.0 -- unsigned source-tag release (2026-09-13). Wave HH drain:
+             --trust=cap:<n> HTTPS gate + WEAK-stub net_tls_wrap
+             (pdxcurl#8), --audit-only INTENT-only path (pdxcurl#11),
+             GET happy-path smoke vs mocked fixture (pdxcurl#13),
+             redirect-chain method-preservation + 10-hop-cap smoke
+             (pdxcurl#17), release closer (pdxcurl#18 -- manifest
+             stays UNSIGNED pending v0.33 PQ-signing crypto).
 -->
+
+## [1.4.0] -- 2026-09-13 -- Wave HH TLS gate + audit-only + smoke matrix (unsigned source-tag)
+
+### Added
+
+- **--trust=cap:<n> HTTPS gate + WEAK-stub net_tls_wrap (pdxcurl#8,
+  M3-001).** New `src/tls_wire.pdx` module `TlsWire` publishes
+  `tls_wire_parse_cap_uri` (decodes the `cap:<n>` half of a
+  `--trust=cap:<n>` argv token into a u64, or an all-ones sentinel on
+  malformed input) and `tls_wire_net_tls_wrap(sock_fd, trust_cap,
+  hostname_ptr, hostname_len) -> u64`. `src/main.pdx`'s Phase A
+  scanner gains `curl_flag_trust_long` / `curl_take_trust` (single-
+  token flag, no following argv slot consumed) storing
+  `trust_present` + `trust_cap_n` into two new `curl_argv_slots`
+  fields (+32/+40, widening the slot block from 32 to 56 bytes).
+  Phase B.4's https gate now requires `trust_present != 0` before
+  letting an https:// URL past `curl_url_parse_ok` (still refuses at
+  `curl_tls_not_yet` / `EXIT_TLS_HANDSHAKE_FAILED=9` without a trust
+  token, unchanged from v1.3.0); Phase C.1.5, right after a successful
+  `sys_connect`, calls `tls_wire_net_tls_wrap`. libpdx-net does not
+  exist in this repo and this toolchain has no STB_WEAK linker
+  binding (see `src/tls_wire.pdx` header for the full rationale
+  mirroring `tools/user/cat/src/schema_wire.pdx`'s precedent), so the
+  stub is a real, locally-defined function that always returns 0
+  (success-passthrough) -- the request proceeds in **plaintext** over
+  the raw socket rather than performing a real TLS handshake. The new
+  `curl_tls_wrap_fail` branch (RC_TLS_HANDSHAKE_FAILED=4 /
+  EXIT_TLS_HANDSHAKE_FAILED=9) stays unreachable until a real
+  `net_tls_wrap` lands at a future libpdx-net M5 unblock. `caps.decl`
+  keeps `KIND_TLS_TRUST` optional -- promoting it to mandatory ahead
+  of a real enforcement point (pdxtrust M1) would refuse every
+  https:// invocation for a claim this landing cannot back up.
+
+- **--audit-only INTENT-only path (pdxcurl#11, M3-004).** `src/main.
+  pdx` gains `curl_flag_audit_long` / `curl_take_audit` (single-token
+  flag storing `audit_only` at `curl_argv_slots+48`) and
+  `curl_audit_only_path`: reached from `curl_url_parse_ok` (Phase
+  B.4, checked BEFORE the https/--trust= gate, since an audit-only
+  run performs no network I/O regardless of scheme) it determines
+  method, marshals + emits an INTENT `HttpRequestRecord@0.1`
+  (`result_code = RC_AUDIT_ONLY = 11`) to the audit sink via
+  `sys_semantic_send`, writes `pdxcurl: --audit-only, INTENT emitted,
+  no I/O\n` to fd 2, then `sys_exit(EXIT_SUCCESS_AUDIT_ONLY = 200)` --
+  a new taxonomy constant in `src/error_taxonomy.pdx`, deliberately
+  DISTINCT from the ordinary success exit (0) so a caller can tell an
+  audit-only run apart from a completed request without parsing the
+  audit stream. No `sys_socket`/`connect`/`send`/`recv` and no
+  semantic-pipe `HttpRequestRecord@0.1` emit run on this path (that
+  stream stays reserved for completed requests per M3-003's
+  contract).
+
+- **GET happy-path smoke vs mocked fixture (pdxcurl#13, M4-001).**
+  New `tests/curl_get_smoke.pdx` (module `CurlGetSmoke`). Since
+  `src/main.pdx` issues raw `syscall` instructions rather than named
+  `net_*` wrappers (nothing to intercept) and this toolchain has no
+  STB_WEAK binding, the "WEAK stub" is three real local functions
+  (`net_mock_connect` / `net_mock_send` / `net_mock_recv`, the latter
+  copying a canned `HTTP/1.1 200 OK ... hello world\n` response into
+  the caller's buffer) feeding a self-contained `curl_run_request`
+  driver that parses status + finds the body via the same
+  `\r\n\r\n`-scan idiom `src/main.pdx` uses, writes the body to fd 1,
+  and asserts a 12-byte body match. Exit 0 + `gets_msg_ok` on fd 2 on
+  pass. Fully self-contained (tools/build.sh compiles every
+  `tests/*.pdx` standalone and never links them against `src/*.pdx`
+  or each other).
+
+- **Redirect-chain method-preservation + 10-hop-cap smoke (pdxcurl#17,
+  M4-005).** New `tests/curl_redirect_matrix.pdx` (module
+  `CurlRedirectMatrix`). `src/main.pdx` does not follow redirects at
+  v1.4.0 (`redirect_count` stays 0), so this witness carries its own
+  local redirect-decision engine: `crm_redirect_method` asserts
+  301/302/303 downgrade `POST`->`GET` and 307/308 preserve `POST`
+  across five canned-response rows (each also stages a canned final
+  200, parsed through the same bytes-`[9..12]` status-parse idiom),
+  and `crm_follow_chain` simulates an all-redirect chain that must
+  refuse at the 11th hop (`CRM_MAX_HOPS = 10`) rather than loop
+  forever. A future landing that gives `src/main.pdx` a real
+  Location-header follow loop replaces this file's local engine with
+  calls into that shipped one, preserving the row shapes.
+
+- **Release closer (pdxcurl#18, M5-001).** `manifest.pdxproj`
+  `version = 1.4.0`; `sources:` gains `src/tls_wire.pdx`; `tests:`
+  gains the two new smoke files. `PDX_TOOL_VERSION` bumped to
+  `"1.4.0\0"` in `src/tool_ident.pdx`. `release/RELEASE-1.4.0.md`
+  (operator note) and `release/manifest.pdxsig.txt` refreshed to
+  v1.4.0 -- STILL an UNSIGNED source-form placeholder (every
+  `<BLAKE3-*>` slot remains a fill-in): the v0.33 PQ-signing crypto
+  landing (`paideia-pq-sign::sign_release_artifact`, Ed25519 +
+  ML-DSA-65 hybrid) is not yet invocable from this repo's tooling, so
+  "dual-signed" in the issue title names the target shape rather than
+  v1.4.0's actual content. `README.md` gains a version/CLI-surface
+  status line.
+
+### Not shipped (still deferred)
+
+- A real TLS handshake (`net_tls_wrap` stays a passthrough stub; see
+  pdxcurl#8 above) -- blocked on libpdx-net M5 + pdxtrust M1.
+- DNS-name hosts, `-H`/`--header`, `-X`/`--method` override,
+  chunked-encoding, recv-loop for bodies > 4 KiB -- unchanged from
+  v1.3.0.
+- `--dry-run` body (pdxcurl#3 -- rodata reservation only).
+- A real redirect-follow loop in `src/main.pdx` (pdxcurl#17's smoke
+  exercises a local decision engine, not a shipped chain-follow).
+- Actual Ed25519 + ML-DSA-65 signatures over the release manifest
+  (blocked on the v0.33 PQ-signing crypto landing).
+- Mirror push (pdxcurl#19, M5-002).
+
+### Encoder discipline
+
+Every new `.pdx` in this release honours the paideia-as 0.36+
+pitfalls per user memory `pdx encoder pitfalls`: no `test rN, rN`; no
+2-op `imul r, imm` (decimal decode/encode uses the shl-3/add/add *10
+idiom throughout); no `and reg, imm64`; byte loads via `xor rN, rN;
+mov_b rN, [ptr]`; module basename PascalCase (`TlsWire`,
+`CurlGetSmoke`, `CurlRedirectMatrix`); every label prefixed `tlsw_` /
+`gets_` / `crm_` per file (reserved-word discipline: `loop`, `if`,
+etc. are keywords); single-line string literals with `_len` sibling
+constants; no push/pop anywhere in the three new files, so every
+`call` site lands with `rsp % 16 == 0` inherited from process entry
+without needing alignment padding.
 
 ## [1.3.0] -- 2026-09-13 -- Wave CC M2/M3 real bodies (unsigned source-tag)
 

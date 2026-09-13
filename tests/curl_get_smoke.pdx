@@ -1,0 +1,350 @@
+// tests/curl_get_smoke.pdx -- pdxcurl M4-001 happy-path HTTP GET smoke
+//                              vs a canned fixture (pdxcurl#13).
+//
+// Wave: R100  Milestone: M4-001 (pdxcurl#13)
+// Doc:  design/networking/r100-user-tools-plan.md §13.3 (paideia-os)
+//       + design/networking/pdxcurl-design.md §4 (request pipeline).
+//
+// Purpose ---------------------------------------------------------------
+// Exercises the pdxcurl request/response pipeline shape (assemble a GET
+// request, "transmit" it, receive a canned HTTP/1.1 200 response,
+// locate the header/body boundary, parse the status line, write the
+// body to stdout) WITHOUT a real TCP peer. src/main.pdx's own _start
+// issues sys_socket/sys_connect/sys_send/sys_recv as bare `syscall`
+// instructions (no named net_* wrapper to intercept), and this
+// toolchain has no linker-weak (STB_WEAK) mechanism to override a
+// real syscall site from a separate translation unit -- the same
+// constraint tools/user/cat/src/schema_wire.pdx documents at length
+// for libpdx-schema-registry. So the "WEAK stub" the issue asks for is
+// expressed the only way this toolchain supports it (matching that
+// precedent): net_mock_connect / net_mock_send / net_mock_recv are
+// REAL, LOCAL functions defined in THIS file with placeholder bodies
+// (connect/send unconditionally succeed; recv copies the canned fixture
+// response into the caller's buffer), and curl_run_request is a
+// SELF-CONTAINED reimplementation of the response-handling half of
+// src/main.pdx's Phase D (status parse + header/body split + body
+// write) sized for this witness -- not a refactor of the shipped
+// src/main.pdx driver, which stays untouched.
+//
+// tools/build.sh compiles every tests/*.pdx to its own standalone
+// build-out/tests-*.o (see STATUS.md "M4 witnesses land ... as
+// compile-only ... unlinked" -- confirmed at tools/build.sh: the
+// tests/*.o outputs are never added to the `ld` link line). Each test
+// file must therefore be a single, fully self-contained translation
+// unit: no reference to any symbol declared in src/*.pdx or another
+// tests/*.pdx file. Every constant this file needs is declared locally.
+//
+// Fixture ----------------------------------------------------------------
+// Canned response (GETS_FIXTURE_RESPONSE, 51 wire bytes):
+//   "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nhello world\n"
+// Header/body boundary at byte 39 (found by the same linear "\r\n\r\n"
+// scan src/main.pdx's curl_scan_hdrs_loop uses); body = "hello world\n"
+// (12 bytes, matching the Content-Length header value).
+//
+// Assertion ---------------------------------------------------------------
+// curl_run_request returns 0 iff: (a) net_mock_connect succeeds: (b)
+// the parsed status == 200; (c) the located body is exactly
+// GETS_EXPECT_BODY (12-byte memcmp). On success the body is written to
+// fd 1 (stdout) BEFORE the assertion result is known, so "hello world\n"
+// reaches stdout whenever the parse pipeline reaches that point --
+// _start additionally treats a non-zero curl_run_request return as a
+// failing run (fd 2 fingerprint + sys_exit(1)) so a consumer can gate
+// on process exit status alone without inspecting stdout.
+//
+// paideia-as compliance (pdx encoder pitfalls, per user memory)
+// ---------------------------------------------------------------
+//   - Module CurlGetSmoke (PascalCase file basename).
+//   - No `test rN, rN` -- every zero-check is `cmp rN, 0`.
+//   - No 2-op `imul r, imm` -- unused here (no decimal encode needed).
+//   - No `and r11, imm64` -- unused here.
+//   - Byte loads via `xor rN, rN; mov_b rN, [ptr]`.
+//   - Every label prefixed `gets_` (reserved-word discipline: `loop`,
+//     `if`, etc. are keywords).
+//   - Single-line string literals; every literal carries a `_len`
+//     sibling naming the wire byte count (excludes trailing NUL).
+//   - No push/pop anywhere in this file: process entry leaves
+//     rsp % 16 == 0, and every `call` site here is reached with zero
+//     intervening stack traffic, so alignment holds without spills.
+
+module CurlGetSmoke = structure {
+
+  // ---- canned fixture response + expected body ------------------------
+  pub let GETS_FIXTURE_RESPONSE     : [u8; 52] = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nhello world\n\0"
+  pub let GETS_FIXTURE_RESPONSE_LEN : u64      = 51
+
+  pub let GETS_EXPECT_BODY          : [u8; 13] = "hello world\n\0"
+  pub let GETS_EXPECT_BODY_LEN      : u64      = 12
+
+  // ---- canned request line (content unread by the mock; kept for a
+  //      future real net_send swap-in) + fixture URL (per issue text:
+  //      curl_run_request("http://fixture.example/index")) ------------
+  pub let GETS_REQUEST_LINE         : [u8; 47] = "GET /index HTTP/1.0\r\nHost: fixture.example\r\n\r\n\0"
+  pub let GETS_REQUEST_LINE_LEN     : u64      = 46
+
+  pub let GETS_FIXTURE_URL          : [u8; 29] = "http://fixture.example/index\0"
+  pub let GETS_FIXTURE_URL_LEN      : u64      = 28
+
+  // ---- fd 2 fingerprints ------------------------------------------------
+  pub let gets_msg_ok               : [u8; 27] = "pdxcurl curl_get_smoke ok\n\0"
+  pub let gets_msg_ok_len           : u64      = 26
+
+  pub let gets_msg_fail             : [u8; 29] = "pdxcurl curl_get_smoke FAIL\n\0"
+  pub let gets_msg_fail_len         : u64      = 28
+
+  // ---- .bss recv scratch (canned response copied here by the mock) ----
+  pub let mut gets_recv_buf         : [u8; 64] = uninit @align(8)
+
+  // ======================================================================
+  // net_mock_connect(ip, port) -> 0
+  //
+  // WEAK-stub connect: unconditionally succeeds. Local real function
+  // (this toolchain has no STB_WEAK binding, per libpdx-argv's
+  // version_backend.pdx header); a future landing that wires a real
+  // net_connect keeps this file's call site shape and only swaps which
+  // function it names.
+  // ======================================================================
+  pub let net_mock_connect : (u64, u64) -> u64 !{} @{} =
+    fn (ip: u64, port: u64) -> unsafe {
+      effects: {}, capabilities: {},
+      justification: "pdxcurl#13 M4-001: mock TCP connect for curl_get_smoke. Always succeeds (rax=0) -- there is no fixture TCP peer at witness scope; the point of this witness is the response-parse pipeline, not the socket-family syscalls src/main.pdx already exercises for real at M2-002 (pdxcurl#5). Pure leaf, ip/port unread.",
+      block: {
+        xor rax, rax;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // net_mock_send(fd, buf, len) -> len
+  //
+  // WEAK-stub send: pretends every byte was transmitted. Pure leaf,
+  // fd/buf unread.
+  // ======================================================================
+  pub let net_mock_send : (u64, u64, u64) -> u64 !{} @{} =
+    fn (fd: u64, buf: u64, len: u64) -> unsafe {
+      effects: {}, capabilities: {},
+      justification: "pdxcurl#13 M4-001: mock TCP send for curl_get_smoke. Returns len unchanged (rdx, third param) in rax -- a short-write is never simulated at witness scope. Pure leaf.",
+      block: {
+        mov rax, rdx;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // net_mock_recv(fd, buf_out, cap) -> bytes_copied
+  //
+  // WEAK-stub recv: copies GETS_FIXTURE_RESPONSE into buf_out (cap MUST
+  // be >= GETS_FIXTURE_RESPONSE_LEN; gets_recv_buf is sized 64 so the
+  // one call site in this file always satisfies it). Returns the byte
+  // count copied.
+  // ======================================================================
+  pub let net_mock_recv : (u64, u64, u64) -> u64 !{mem} @{} =
+    fn (fd: u64, buf_out: u64, cap: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "pdxcurl#13 M4-001: mock TCP recv for curl_get_smoke. Byte-copy loop from GETS_FIXTURE_RESPONSE (rip-relative) into buf_out (rsi, second param); cap (rdx, third param) is not consulted since the one caller in this file always supplies gets_recv_buf (64 B) against a 51-byte fixture. Returns GETS_FIXTURE_RESPONSE_LEN in rax. Byte loads via xor+mov_b per encoder discipline. Leaf, no nested calls.",
+      block: {
+        lea r8, [rip + GETS_FIXTURE_RESPONSE];
+        xor rcx, rcx;
+      gets_recv_copy_loop:
+        cmp rcx, 51;
+        jae gets_recv_copy_done;
+        xor rax, rax;
+        mov_b rax, [r8 + rcx*1];
+        mov_b [rsi + rcx*1], rax;
+        add rcx, 1;
+        jmp gets_recv_copy_loop;
+      gets_recv_copy_done:
+        mov rax, 51;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // curl_run_request(url_ptr) -> 0 (pass) | 1 (fail)
+  //
+  // Self-contained happy-path driver for this witness: connect (mock) ->
+  // send request line (mock) -> recv canned response (mock) -> parse
+  // status from bytes [9..12] -> scan "\r\n\r\n" for the body offset ->
+  // write body to fd 1 -> memcmp body against GETS_EXPECT_BODY -> return
+  // 0 iff status==200 AND body matches exactly.
+  // ======================================================================
+  pub let curl_run_request : (u64) -> u64 !{mem, sysreg} @{} =
+    fn (url_ptr: u64) -> unsafe {
+      effects: {mem, sysreg},
+      capabilities: {},
+      justification: "pdxcurl#13 M4-001: curl_run_request witness driver, named per the issue text's call shape `curl_run_request(\"http://fixture.example/index\")`. url_ptr (rdi) is unread at witness scope (the mock ignores the target; kept as a parameter so a future swap to the real src/main.pdx driver's request-assembly needs no call-site edit here). Register plan: r12=ip (unused literal), r13=connect result, r14=bytes_recv'd, r15=headers-end offset (\\r\\n\\r\\n scan cursor+4), rbx=body_len, rbp=match accumulator for the 12-byte memcmp. Body: (1) call net_mock_connect(127.0.0.1, 80) -> r13; nonzero -> gets_run_connect_fail (return 1). (2) call net_mock_send(fd=0, &GETS_REQUEST_LINE, GETS_REQUEST_LINE_LEN) -- return value unchecked (mock always echoes len). (3) call net_mock_recv(fd=0, &gets_recv_buf, 64) -> r14 = bytes_recv'd. (4) Parse status from gets_recv_buf[9..12] as three ASCII decimal digits via the same shift/add *10 idiom src/main.pdx's response parser uses (no 2-op imul); status != 200 -> gets_run_bad_status (return 1). (5) Linear scan for the first \\r\\n\\r\\n (0x0D 0x0A 0x0D 0x0A) starting at cursor 0, capped by r14; not found within bounds -> gets_run_bad_resp (return 1); found -> r15 = cursor+4 (body start offset). (6) body_len = r14 - r15 (rbx); write body to fd 1 via sys_write (SC+ ID 1) BEFORE the memcmp so stdout carries the parsed body on every path that reaches this point, matching the issue's 'hello world in stdout' observable independent of the final pass/fail verdict. (7) 12-byte memcmp of gets_recv_buf+r15 against GETS_EXPECT_BODY; any mismatch or body_len != 12 -> gets_run_body_mismatch (return 1). (8) All gates passed -> return 0. Encoder discipline: no `test rN, rN` (cmp rN, 0 throughout); no 2-op imul; byte loads via xor+mov_b; no `and reg, imm64`; no push/pop anywhere in this file (SysV alignment inherited from process entry / from _start's own zero-push posture, so every nested call here lands with rsp % 16 == 0). Labels prefixed gets_run_.",
+      block: {
+        // (1) mock connect.
+        mov rdi, 0x7F000001;
+        mov rsi, 80;
+        call net_mock_connect;
+        cmp rax, 0;
+        jne gets_run_connect_fail;
+
+        // (2) mock send (request line content unread by the mock).
+        xor rdi, rdi;
+        lea rsi, [rip + GETS_REQUEST_LINE];
+        mov rdx, 46;
+        call net_mock_send;
+
+        // (3) mock recv into gets_recv_buf.
+        xor rdi, rdi;
+        lea rsi, [rip + gets_recv_buf];
+        mov rdx, 64;
+        call net_mock_recv;
+        mov r14, rax;                              // bytes_recv'd
+
+        cmp r14, 20;
+        jl gets_run_bad_resp;
+
+        // (4) parse status from bytes [9..12].
+        lea r8, [rip + gets_recv_buf];
+        xor rax, rax;
+        mov_b rax, [r8 + 9];
+        sub rax, 48;
+        cmp rax, 9;
+        ja gets_run_bad_resp;
+        mov r9, rax;
+        shl rax, 3;
+        add rax, r9;
+        add rax, r9;                                // d1*10
+        xor rdx, rdx;
+        mov_b rdx, [r8 + 10];
+        sub rdx, 48;
+        cmp rdx, 9;
+        ja gets_run_bad_resp;
+        add rax, rdx;                               // d1*10 + d2
+        mov r9, rax;
+        shl rax, 3;
+        add rax, r9;
+        add rax, r9;                                // (d1*10+d2)*10
+        xor rdx, rdx;
+        mov_b rdx, [r8 + 11];
+        sub rdx, 48;
+        cmp rdx, 9;
+        ja gets_run_bad_resp;
+        add rax, rdx;                               // status
+        cmp rax, 200;
+        jne gets_run_bad_status;
+
+        // (5) scan for "\r\n\r\n".
+        xor rcx, rcx;
+      gets_run_scan_loop:
+        mov r10, rcx;
+        add r10, 4;
+        cmp r10, r14;
+        ja gets_run_bad_resp;
+        xor rax, rax;
+        mov_b rax, [r8 + rcx*1];
+        cmp rax, 0x0d;
+        jne gets_run_scan_next;
+        xor rax, rax;
+        mov r11, rcx;
+        add r11, 1;
+        mov_b rax, [r8 + r11*1];
+        cmp rax, 0x0a;
+        jne gets_run_scan_next;
+        xor rax, rax;
+        add r11, 1;
+        mov_b rax, [r8 + r11*1];
+        cmp rax, 0x0d;
+        jne gets_run_scan_next;
+        xor rax, rax;
+        add r11, 1;
+        mov_b rax, [r8 + r11*1];
+        cmp rax, 0x0a;
+        jne gets_run_scan_next;
+        add rcx, 4;
+        jmp gets_run_have_body;
+      gets_run_scan_next:
+        add rcx, 1;
+        jmp gets_run_scan_loop;
+
+      gets_run_have_body:
+        mov r15, rcx;                               // body start offset
+        mov rbx, r14;
+        sub rbx, r15;                                // body_len
+
+        // (6) write body to fd 1.
+        mov rdi, 1;
+        lea rsi, [rip + gets_recv_buf];
+        add rsi, r15;
+        mov rdx, rbx;
+        mov rax, 1;
+        syscall;
+
+        // (7) 12-byte memcmp against GETS_EXPECT_BODY.
+        cmp rbx, 12;
+        jne gets_run_body_mismatch;
+        lea r9, [rip + GETS_EXPECT_BODY];
+        lea r10, [rip + gets_recv_buf];
+        add r10, r15;
+        xor rcx, rcx;
+      gets_run_memcmp_loop:
+        cmp rcx, 12;
+        jae gets_run_pass;
+        xor rax, rax;
+        mov_b rax, [r9 + rcx*1];
+        xor rdx, rdx;
+        mov_b rdx, [r10 + rcx*1];
+        cmp rax, rdx;
+        jne gets_run_body_mismatch;
+        add rcx, 1;
+        jmp gets_run_memcmp_loop;
+
+      gets_run_pass:
+        xor rax, rax;
+        ret;
+
+      gets_run_connect_fail:
+        mov rax, 1;
+        ret;
+      gets_run_bad_status:
+        mov rax, 1;
+        ret;
+      gets_run_bad_resp:
+        mov rax, 1;
+        ret;
+      gets_run_body_mismatch:
+        mov rax, 1;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // _start -- witness entry point.
+  // ======================================================================
+  pub let _start : () -> () !{mem, sysreg} @{fs, sched, cap} =
+    fn () -> unsafe {
+      effects: {mem, sysreg},
+      capabilities: {fs, sched, cap},
+      justification: "pdxcurl#13 M4-001 happy-path HTTP GET smoke vs fixture. Drives curl_run_request(&GETS_FIXTURE_URL) -> rax; rax==0 writes gets_msg_ok to fd 2 and sys_exit(0); nonzero writes gets_msg_fail to fd 2 and sys_exit(1). No push/pop in this file so rsp % 16 == 0 (inherited from process entry) at the one nested call site. Labels prefixed gets_.",
+      block: {
+        lea rdi, [rip + GETS_FIXTURE_URL];
+        call curl_run_request;
+        cmp rax, 0;
+        jne gets_fail;
+
+        mov rdi, 2;
+        lea rsi, [rip + gets_msg_ok];
+        mov rdx, 26;
+        mov rax, 1;
+        syscall;
+        xor rdi, rdi;
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      gets_fail:
+        mov rdi, 2;
+        lea rsi, [rip + gets_msg_fail];
+        mov rdx, 28;
+        mov rax, 1;
+        syscall;
+        mov rdi, 1;
+        mov rax, 60;
+        syscall;
+        hlt;
+      }
+    }
+
+}

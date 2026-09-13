@@ -1,0 +1,187 @@
+// src/tls_wire.pdx -- pdxcurl v1.4.0 (Wave HH: pdxcurl#8)
+// TlsWire module: --trust=cap:<n> resolution + net_tls_wrap wiring.
+//
+// Purpose
+// -------
+// M3-001 (pdxcurl#8) asks for the HTTPS path: `--trust=cap:<n>`
+// argv-token resolution feeding a `libpdx-net.net_tls_wrap` call once
+// a TCP connection is established. libpdx-net does not exist in this
+// repo (STATUS.md: "libpdx-net net_tls_wrap -- UNAVAILABLE, blocked on
+// libpdx-net M5") and pdxtrust's KIND_TLS_TRUST cap-mint pipeline is
+// likewise unavailable ("pdxtrust KIND_TLS_TRUST cap mint --
+// UNAVAILABLE, blocked on pdxtrust M1"), so `net_tls_wrap` cannot be a
+// real cross-repo `extern` call at this landing: `ld -nostdlib
+// --fatal-warnings` (tools/build.sh's link step) would refuse an
+// undefined-symbol relocation against a library this repo does not
+// link.
+//
+// A true weak-symbol default (STB_WEAK, resolved to a fallback body
+// only when no stronger definition is linked) is also not an option
+// here: per libpdx-argv's own src/version_backend.pdx header ("the
+// paideia-as 0.36 encoder does not currently expose the STB_WEAK
+// binding"), this toolchain has no linker-weak mechanism to fall back
+// on -- the same constraint tools/user/cat/src/schema_wire.pdx
+// documents at length for libpdx-schema-registry.
+//
+// The "WEAK stub" this issue asks for is therefore expressed the only
+// way this toolchain supports it, following the schema_wire.pdx /
+// mount.pdxfs / mkfs.pdxfs precedent: `net_tls_wrap` is defined IN
+// this module as a REAL, LINKABLE function carrying the eventual real
+// contract's argument shape (sock_fd, trust_cap, hostname_ptr,
+// hostname_len -> u64), but its BODY is a placeholder that
+// unconditionally returns 0 (success-passthrough) without inspecting
+// any argument. The ONE call site (src/main.pdx's Phase C.1.5, right
+// after sys_connect succeeds on an https:// request) is the only thing
+// that needs to change when a real libpdx-net client lands -- the
+// call keeps its signature and argument order, only the callee's body
+// swaps from "return 0" to "perform the real TLS handshake and return
+// 0 on success / nonzero on failure".
+//
+// Because the stub always succeeds, an https:// request wired through
+// this file at v1.4.0 proceeds in PLAINTEXT over the raw TCP socket --
+// this is a wiring landing (the argv surface + the call-site + the
+// failure-handling shape all exist and are exercised), not a real
+// handshake. src/main.pdx's curl_tls_wrap_fail branch (RC_TLS_
+// HANDSHAKE_FAILED=4 / EXIT_TLS_HANDSHAKE_FAILED=9) is unreachable
+// while net_tls_wrap stays a passthrough stub.
+//
+// --trust=cap:<n> argv surface
+// -----------------------------
+// `--trust=cap:<n>` is a SINGLE-TOKEN flag (unlike `-o`/`-d`, which
+// each consume a following argv slot): the cap URI is embedded after
+// the `=` in the same argv[i] string. src/main.pdx's Phase A scanner
+// confirms the `--trust=` prefix inline (matching its existing
+// `curl_flag_output_long` / `curl_flag_data_long` byte-by-byte style)
+// then hands the pointer to the remainder (`argv[i] + 8`, i.e. right
+// after the `=`) to `tls_wire_parse_cap_uri`, which validates the
+// `cap:` tag and decodes the decimal `<n>` that follows it. A URI that
+// is not `cap:<digits>` (missing tag, non-digit, or zero digits)
+// returns the all-ones u64 sentinel; the scanner refuses the whole
+// argv line at `curl_usage` (exit EXIT_ARGV_USAGE=2) on that sentinel.
+// `<n>` is stored verbatim as `trust_cap_n` (curl_argv_slots+40) and
+// forwarded as `net_tls_wrap`'s `trust_cap` argument -- it is NOT
+// resolved against a live capability table at this landing (pdxtrust
+// M1 is what would make `<n>` a real KIND_TLS_TRUST cap-slot index;
+// until then this file treats it as an opaque u64 the stub ignores).
+//
+// caps.decl posture
+// ------------------
+// caps.decl keeps `KIND_TLS_TRUST` OPTIONAL (its comment already
+// anticipates this landing: "mandatory once M3-001 (pdxcurl#8) lands
+// the --trust= cap resolution + net_tls_wrap call"). This file does
+// NOT promote it to mandatory: net_tls_wrap is still a stub that
+// performs no real capability check, and promoting the caps.decl
+// entry to mandatory ahead of a real enforcement point would make
+// every https:// invocation (even a --trust=cap:<n> one) refuse
+// -EACCES for callers whose parent process never carried the cap --
+// an enforcement claim this landing cannot back up. Promotion is
+// deferred to the real net_tls_wrap landing (libpdx-net M5 +
+// pdxtrust M1).
+//
+// paideia-as compliance
+// ---------------------
+//   - Module TlsWire (PascalCase file basename).
+//   - No `test rN, rN` -- every zero-check is `cmp rN, 0`.
+//   - No 2-op `imul r, imm` -- decimal decode uses the shl-3/add/add
+//     *10 idiom (matches src/main.pdx's curl_port_loop precedent).
+//   - No `and r11, imm64`.
+//   - Byte loads via `xor rN, rN; mov_b rN, [ptr]`.
+//   - Every label prefixed `tlsw_` (reserved-word discipline).
+//   - No push/pop: both functions are leaves (no nested CALL), so no
+//     callee-save register needs preserving and no alignment padding
+//     is needed at either of the two call sites in src/main.pdx.
+
+module TlsWire = structure {
+
+  // ---- documentation-only: matches caps.decl's KIND_TLS_TRUST value --
+  // Not read by any code path in this file; kept as a named constant
+  // so a future real-cap-resolution landing has one place to look up
+  // the kind tag pdxcurl-design.md §12.3 assigns it.
+  pub let KIND_TLS_TRUST : u64 = 0x1A7
+
+  // ======================================================================
+  // tls_wire_parse_cap_uri(tail_ptr) -> n | 0xFFFFFFFFFFFFFFFF (invalid)
+  //
+  // tail_ptr points just past the "--trust=" prefix (already confirmed
+  // by src/main.pdx's curl_flag_trust_long). Validates the literal
+  // "cap:" tag, then decodes the decimal digits that follow (1..10
+  // digits) into a u64. Any deviation (missing/short "cap:" tag,
+  // non-digit byte, zero digits, more than 10 digits) returns the
+  // all-ones sentinel rather than a partially-decoded value.
+  // ======================================================================
+  pub let tls_wire_parse_cap_uri : (u64) -> u64 !{mem} @{} =
+    fn (tail_ptr: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "pdxcurl#8 M3-001: decode the `cap:<n>` half of a `--trust=cap:<n>` argv token. rdi=tail_ptr (the byte right after `--trust=`). Confirms the 4-byte literal tag 'c','a','p',':' at tail_ptr[0..4) -- any mismatch jumps to tlsw_pc_bad. Then decodes ASCII decimal digits starting at tail_ptr+4 (r9=accumulator, r10=digit count, rcx=cursor) using the shl-3/add/add *10 idiom (no 2-op imul, matching src/main.pdx's curl_port_loop / crm_status_parse precedent) until a NUL terminator; a non-digit byte before NUL, zero digits total, or more than 10 digits all jump to tlsw_pc_bad. On success returns the decoded u64 in rax; tlsw_pc_bad returns the all-ones sentinel (computed via `xor rax,rax; sub rax,1` rather than a 64-bit immediate load, avoiding any question about imm64 MOV support). Byte loads via xor+mov_b. Pure leaf, no nested calls, no push/pop needed. Labels prefixed tlsw_pc_.",
+      block: {
+        xor rax, rax;
+        mov_b rax, [rdi + 0];
+        cmp rax, 0x63;                             // 'c'
+        jne tlsw_pc_bad;
+        xor rax, rax;
+        mov_b rax, [rdi + 1];
+        cmp rax, 0x61;                             // 'a'
+        jne tlsw_pc_bad;
+        xor rax, rax;
+        mov_b rax, [rdi + 2];
+        cmp rax, 0x70;                             // 'p'
+        jne tlsw_pc_bad;
+        xor rax, rax;
+        mov_b rax, [rdi + 3];
+        cmp rax, 0x3a;                             // ':'
+        jne tlsw_pc_bad;
+
+        xor r9, r9;                                // acc
+        xor r10, r10;                              // digit count
+        mov rcx, 4;                                // cursor (past "cap:")
+      tlsw_pc_digit_loop:
+        xor rax, rax;
+        mov_b rax, [rdi + rcx*1];
+        cmp rax, 0;
+        je tlsw_pc_digit_done;
+        sub rax, 48;
+        cmp rax, 9;
+        ja tlsw_pc_bad;
+        mov r8, r9;
+        shl r9, 3;
+        add r9, r8;
+        add r9, r8;                                // acc*10
+        add r9, rax;
+        add rcx, 1;
+        add r10, 1;
+        cmp r10, 10;                                // cap at 10 digits
+        ja tlsw_pc_bad;
+        jmp tlsw_pc_digit_loop;
+
+      tlsw_pc_digit_done:
+        cmp r10, 0;                                 // zero digits -> bad
+        je tlsw_pc_bad;
+        mov rax, r9;
+        ret;
+
+      tlsw_pc_bad:
+        xor rax, rax;
+        sub rax, 1;                                 // all-ones sentinel
+        ret
+      }
+    }
+
+  // ======================================================================
+  // net_tls_wrap(sock_fd, trust_cap, hostname_ptr, hostname_len) -> 0 | nz
+  //
+  // WEAK STUB (see file header): always returns 0 (success-passthrough).
+  // Every argument is unread. Called from src/main.pdx's Phase C.1.5
+  // immediately after a successful sys_connect on an https:// request
+  // that carried a --trust=cap:<n> token.
+  // ======================================================================
+  pub let tls_wire_net_tls_wrap : (u64, u64, u64, u64) -> u64 !{} @{} =
+    fn (sock_fd: u64, trust_cap: u64, hostname_ptr: u64, hostname_len: u64) -> unsafe {
+      effects: {}, capabilities: {},
+      justification: "pdxcurl#8 M3-001: net_tls_wrap WEAK stub. libpdx-net does not exist in this repo (STATUS.md: net_tls_wrap UNAVAILABLE, blocked on libpdx-net M5) and this toolchain has no STB_WEAK linker binding (see file header + libpdx-argv's version_backend.pdx precedent), so a real cross-repo extern reference would fail `ld --fatal-warnings` outright. This function is therefore a real, linkable, locally-defined placeholder carrying the eventual real contract's argument shape (rdi=sock_fd, rsi=trust_cap, rdx=hostname_ptr, rcx=hostname_len) that unconditionally returns 0 (success) without inspecting any argument -- the request proceeds in plaintext over the already-open TCP socket rather than performing a real handshake. The ONE call site (src/main.pdx Phase C.1.5) is the only edit a future real libpdx-net M5 landing needs: this function's body swaps from `xor rax,rax; ret` to a real handshake, keeping the signature and argument order. Pure leaf, no nested calls, no push/pop needed.",
+      block: {
+        xor rax, rax;
+        ret
+      }
+    }
+
+}
