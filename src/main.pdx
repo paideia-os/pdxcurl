@@ -1,3 +1,51 @@
+// src/main.pdx -- pdxcurl v1.2.0 STUB body + v1.1-B semantic-pipe
+//                  emission wire (originally landed at v1.1.0
+//                  under pdxcurl#21).
+//
+// v1.2.0 (Wave V drain) edits to this file are COMMENT + RODATA
+// only -- no register-plan / instruction changes to _start. The
+// STUB entry body still marshals + emits + refuses argv with
+// exit 2. The Wave V additions are:
+//   (a) A `curl_msg_dry_run_stub` diagnostic string reserved for
+//       the future --dry-run body (pdxcurl#3, blocked on
+//       pdxcurl#2 parser-body). Referenced by nothing at v1.2.0;
+//       lands so the parser landing is a call-site edit rather
+//       than a rodata edit here.
+//   (b) A honest-witness note (below) that the v1.1-B emission
+//       wire is what v1.2.0 ships for pdxcurl#10 (M3-003) -- the
+//       REAL per-request emit that fills every numeric field
+//       from the response still needs pdxcurl#5 (http_get) and
+//       pdxcurl#9 (audit_id source) to land upstream.
+//
+// pdxcurl#10 (M3-003 semantic-pipe emit) honest witness
+// -----------------------------------------------------
+// The `HttpRequestRecord@0.1` marshal + emit block below IS the
+// v1.1-B wire. What it does not do at v1.2.0:
+//   - fill `method_and_scheme` from an argv-parsed URL (needs
+//     pdxcurl#2 argv parser body + pdxcurl#4 libpdx-url parse);
+//   - fill `status` / `body_bytes` / `header_count` /
+//     `redirect_count` from the response (needs pdxcurl#5
+//     http_get + pdxcurl#8 net_tls_wrap);
+//   - fill `result_code` from the branch outcome (currently
+//     hard-coded to RC_INTENT = 12) -- lands with pdxcurl#12
+//     M3-005 wire-in at each emit-site's error branch (rodata
+//     for the enum already landed at src/error_taxonomy.pdx in
+//     this drain);
+//   - emit the RESULT record after the response (paired-record
+//     discipline is pdxcurl#9 M3-002 audit-side).
+// The v1.2.0 emit is deliberately unchanged from v1.1.0 so
+// downstream consumers keep parsing HRR records against the
+// v1.1-B fingerprint. The real per-request emit lands as an
+// EDIT of this file once its four upstream dependencies clear.
+//
+// pdxcurl v1.2.0 also lands two rodata-only satellite modules
+// referenced by this file only through the manifest sources
+// list (no call-site here at v1.2.0):
+//   - src/error_taxonomy.pdx   (module ErrorTaxonomy)   -- pdxcurl#12
+//   - src/argv_surface.pdx     (module ArgvSurface)     -- pdxcurl#2
+//
+// Original v1.1.0 header follows.
+// ------------------------------------------------------------------
 // src/main.pdx -- pdxcurl v1.1.0 STUB body + v1.1-B semantic-pipe
 //                  emission wire (pdxcurl#21).
 //
@@ -125,8 +173,21 @@ module Main = structure {
   // with grammar + flag hints lands with M1-002 / pdxcurl#2). Wire
   // byte count in `_len` sibling excludes trailing NUL.
   // -----------------------------------------------------------------
-  pub let curl_msg_stub         : [u8; 38] = "pdxcurl: v1.1.0 stub, no request run\n\0"
+  pub let curl_msg_stub         : [u8; 38] = "pdxcurl: v1.2.0 stub, no request run\n\0"
   pub let curl_msg_stub_len     : u64 = 37
+
+  // -----------------------------------------------------------------
+  // curl_msg_dry_run_stub -- reserved for the future --dry-run body
+  // (pdxcurl#3, M1-003). Blocked on pdxcurl#2 parser-body. Referenced
+  // by no _start path at v1.2.0; landed as rodata now so the parser
+  // wire-in is a single call-site edit rather than a rodata edit
+  // here. Emission contract: parser detects --dry-run, marshals the
+  // HttpRequestRecord as it would emit it (result_code = RC_DRY_RUN
+  // = 10 per src/error_taxonomy.pdx), writes this diagnostic to fd 2,
+  // then exits EXIT_OK (0). Wire byte count in `_len` excludes NUL.
+  // -----------------------------------------------------------------
+  pub let curl_msg_dry_run_stub     : [u8; 40] = "pdxcurl: --dry-run, no network I/O run\n\0"
+  pub let curl_msg_dry_run_stub_len : u64      = 39
 
   // -----------------------------------------------------------------
   // v1.1-B semantic-pipe record buffer + supporting state (pdxcurl#21).

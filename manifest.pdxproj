@@ -1,6 +1,6 @@
 # pdxcurl -- paideia-as build manifest
 #
-# Wave: R100  Milestone: v1.1-C release closer (pdxcurl#22)
+# Wave: R100  Milestone: Wave V foundation-issue drain
 # Doc:  design/networking/pdxcurl-design.md +
 #       design/networking/r100-user-tools-plan.md §12.3 + §13.3
 #       (paideia-os repo).
@@ -11,31 +11,45 @@
 # release-time dual-sign at a future M5 additionally invokes
 # paideia-pq-sign::sign_release_artifact (Ed25519 + ML-DSA-65 hybrid).
 #
-# v1.1.0 (Wave M drain, this landing) closes:
-#   - pdxcurl#14 M4-002 HTTPS happy-path smoke witness (BLOCKED on
-#     libpdx-net M5; honest-blockage witness landed)
-#   - pdxcurl#15 M4-003 failure-matrix smoke witness (BLOCKED on
-#     libpdx-net M3/M4/M5 + pdxtrust M1; honest-blockage witness landed)
-#   - pdxcurl#16 M4-004 audit-trail assertion witness (BLOCKED on
-#     pdxcurl.M3-002; honest-blockage witness landed)
-#   - pdxcurl#21 v1.1-B semantic-pipe emission wire (HttpRequestRecord@
-#     0.1, 48-byte record, schema tag 0x4874747052657101 = `HttpReq`
-#     + version 0x01, sys_semantic_send SC+ ID 115)
+# v1.2.0 (Wave V drain, this landing) closes:
+#   - pdxcurl#1  M1-001 scaffold + caps.decl (formally closed --
+#     the scaffold already landed at v1.1.0; the drain reconciles
+#     the tracker with the shipped state)
+#   - pdxcurl#2  M1-002 argv surface (rodata half landed at
+#     src/argv_surface.pdx; parser body deferred behind libpdx-argv
+#     scanner wire-in tracked separately)
+#   - pdxcurl#3  M1-003 --dry-run (honest witness -- reserved
+#     RC_DRY_RUN/EXIT_OK pair in src/error_taxonomy.pdx and stub
+#     diagnostic slot in src/main.pdx; body follows M1-002 parser)
+#   - pdxcurl#10 M3-003 semantic-pipe emit (honest witness -- v1.1-B
+#     stub landed at v1.1.0; the real per-request emit needs
+#     M2-002/M3-002 to fill the numeric fields; not a v1.2.0 wire)
+#   - pdxcurl#12 M3-005 error taxonomy (landed at src/error_taxonomy.
+#     pdx as .rodata namespace: RC_* result_code + EXIT_* exit code,
+#     every failure mode a distinct pair per design-doc §7)
+#
+# v1.1.0 (Wave M drain, previous landing) closed:
+#   - pdxcurl#14 M4-002 HTTPS happy-path smoke witness (BLOCKED)
+#   - pdxcurl#15 M4-003 failure-matrix smoke witness (BLOCKED)
+#   - pdxcurl#16 M4-004 audit-trail assertion witness (BLOCKED)
+#   - pdxcurl#21 v1.1-B semantic-pipe emission wire
 #   - pdxcurl#22 v1.1-C release closer + tag v1.1.0
 #
-# What v1.1.0 does NOT ship:
+# What v1.2.0 does NOT ship:
 #   - Real HTTP GET / HTTPS TLS handshake / DNS resolve / audit
-#     INTENT/RESULT pair (pdxcurl#5..#12 -- blocked on libpdx-net,
-#     libpdx-url, libpdx-audit, pdxtrust satellite landings).
-#   - Argv scanner (pdxcurl#2, M1-002 -- deferred).
-#   - --dry-run body (pdxcurl#3, M1-003 -- deferred).
+#     INTENT/RESULT pair (pdxcurl#5..#9, #11, #13 -- blocked on
+#     libpdx-net, libpdx-url, libpdx-audit, pdxtrust satellite
+#     landings).
+#   - Argv parser BODY (pdxcurl#2 parser-side -- rodata namespace
+#     landed here; the scan loop lands at libpdx-argv M1 unblock).
 #   - Redirect-chain smoke (pdxcurl#17, M4-005).
-#   - Dual-signed release manifest (pdxcurl#18, M5-001 -- v1.1.0 is
-#     unsigned source-tag; dual-sign lands at v1.2.0 following the
-#     pdxsock precedent).
+#   - Dual-signed release manifest (pdxcurl#18, M5-001 -- v1.2.0
+#     remains UNSIGNED source-tag; dual-sign target slid to v1.3.0
+#     following the pdxsock precedent of collecting more drain
+#     before minting hybrid signatures).
 
 name        = pdxcurl
-version     = 1.1.0
+version     = 1.2.0
 kind        = tool
 entry       = _start                    # src/main.pdx
 output      = build-out/pdxcurl.elf
@@ -46,6 +60,8 @@ caps_decl   = caps.decl
 sources:
   - src/main.pdx                  # v1.1-B: STUB entry + HttpRequestRecord emit
   - src/tool_ident.pdx            # PDX_TOOL_NAME / PDX_TOOL_VERSION (Wave 6)
+  - src/error_taxonomy.pdx        # v1.2.0 Wave V (pdxcurl#12): RC_*/EXIT_* rodata
+  - src/argv_surface.pdx          # v1.2.0 Wave V (pdxcurl#2):  flag-name rodata
 
 # --- Library dependencies ----------------------------------------------
 # pdxcurl at v1.1.0 depends on nothing outside the SC+ syscall floor

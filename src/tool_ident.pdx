@@ -31,6 +31,6 @@
 module ToolIdent = structure {
 
   pub let PDX_TOOL_NAME    : [u8; 8] = "pdxcurl\0"
-  pub let PDX_TOOL_VERSION : [u8; 6] = "1.1.0\0"
+  pub let PDX_TOOL_VERSION : [u8; 6] = "1.2.0\0"
 
 }

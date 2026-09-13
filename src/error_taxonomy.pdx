@@ -1,0 +1,102 @@
+// src/error_taxonomy.pdx -- pdxcurl v1.2.0 (Wave V drain: pdxcurl#12)
+// ErrorTaxonomy module: structured result_code + exit code namespace.
+//
+// Purpose
+// -------
+// pdxcurl-design.md §7 defines a two-axis error surface:
+//   result_code (u32): stored inside HttpRequestRecord@0.1 at
+//                      offset +40, emitted through the semantic-
+//                      pipe ring at sys_semantic_send SC+ ID 115.
+//   exit code   (u8):  POSIX process exit status, discoverable
+//                      by any shell / audit consumer without
+//                      parsing the ring.
+//
+// Every failure mode maps to a DISTINCT pair. No bare
+// `curl: (7) Failed to connect` prose string ever emitted.
+//
+// pdxcurl#12 (M3-005) closes on this file: the namespace is
+// landed as .rodata constants so:
+//   (a) src/main.pdx and every future emit-site load from a named
+//       symbol rather than embedding a magic number;
+//   (b) libpdx-audit / semantic-pipe consumers grep the u32 wire
+//       fingerprint (`0x0000_000C = INTENT`, etc.) and dispatch;
+//   (c) a future EDIT of pdxcurl-design.md §7 patches ONE file,
+//       not scattered call-sites across src/ and tests/.
+//
+// The emit-side wiring (branching on request outcome to the right
+// pair) lands per-milestone as pdxcurl#5..#11 close.
+//
+// Result-code enum (u32) -- matches src/main.pdx top comment
+// ----------------------------------------------------------
+//   0  = OK                     (2xx response, request satisfied)
+//   1  = DNS_FAILED             (NXDOMAIN / SERVFAIL)
+//   2  = CONN_REFUSED           (TCP RST during connect)
+//   3  = TLS_KEY_MISMATCH       (SPKI pin fail / trust cap wrong key)
+//   4  = TLS_HANDSHAKE_FAILED   (proto/version/cipher failure)
+//   5  = HTTP_4XX               (response 400..499)
+//   6  = HTTP_5XX               (response 500..599)
+//   7  = TIMEOUT                (connect / read / total deadline)
+//   8  = TOO_MANY_REDIRECTS     (>= redirect-cap follow chain)
+//   9  = NO_PERMISSION          (caps.decl refused a required kind)
+//  10  = DRY_RUN                (--dry-run: no request run)
+//  11  = AUDIT_ONLY             (--audit-only: INTENT emit no I/O)
+//  12  = INTENT                 (STUB v1.1.0 emit; witness only)
+//
+// Exit code (POSIX u8) -- matches design-doc §7
+// ---------------------------------------------
+//   0  = OK / DRY_RUN / AUDIT_ONLY (success surfaces converge)
+//   2  = argv usage error         (missing <url>, bad flag)
+//   3  = caps refusal             (NO_PERMISSION)
+//   4  = HTTP 4xx                 (response 400..499)
+//   5  = HTTP 5xx                 (response 500..599)
+//   6  = DNS NXDOMAIN / SERVFAIL
+//   7  = TCP connection refused
+//   8  = TLS key mismatch / SPKI pin fail
+//   9  = TLS handshake failure    (proto / cipher)
+//  11  = timeout                  (connect / read / total)
+//  12  = too many redirects
+//
+// paideia-as compliance
+// ---------------------
+//   - Module ErrorTaxonomy (PascalCase file basename).
+//   - No function bodies -> no register plan, no encoder guardrails.
+//   - Every enum value `pub let X : u64 = <literal>` in .rodata so
+//     a call-site loads with `mov rax, [rip + RC_TIMEOUT]` (proven
+//     encoder pattern at src/main.pdx line 176 for the schema tag).
+//   - u64 storage (design-doc field is u32; upper bits zero) so a
+//     32-bit store to the record `[r10 + 40]` reads only the low
+//     half. Uniform storage width simplifies the encoder pattern.
+//   - Values stable pre-paideia-os#2000 (schema registry); new
+//     failure modes append rather than renumber.
+
+module ErrorTaxonomy = structure {
+
+  // ---- result_code enum (u32 value in u64 slot) ----
+  pub let RC_OK                   : u64 = 0
+  pub let RC_DNS_FAILED           : u64 = 1
+  pub let RC_CONN_REFUSED         : u64 = 2
+  pub let RC_TLS_KEY_MISMATCH     : u64 = 3
+  pub let RC_TLS_HANDSHAKE_FAILED : u64 = 4
+  pub let RC_HTTP_4XX             : u64 = 5
+  pub let RC_HTTP_5XX             : u64 = 6
+  pub let RC_TIMEOUT              : u64 = 7
+  pub let RC_TOO_MANY_REDIRECTS   : u64 = 8
+  pub let RC_NO_PERMISSION        : u64 = 9
+  pub let RC_DRY_RUN              : u64 = 10
+  pub let RC_AUDIT_ONLY           : u64 = 11
+  pub let RC_INTENT               : u64 = 12
+
+  // ---- exit code (u8 value in u64 slot) ----
+  pub let EXIT_OK                    : u64 = 0
+  pub let EXIT_ARGV_USAGE            : u64 = 2
+  pub let EXIT_CAPS_REFUSED          : u64 = 3
+  pub let EXIT_HTTP_4XX              : u64 = 4
+  pub let EXIT_HTTP_5XX              : u64 = 5
+  pub let EXIT_DNS_FAILED            : u64 = 6
+  pub let EXIT_CONN_REFUSED          : u64 = 7
+  pub let EXIT_TLS_KEY_MISMATCH      : u64 = 8
+  pub let EXIT_TLS_HANDSHAKE_FAILED  : u64 = 9
+  pub let EXIT_TIMEOUT               : u64 = 11
+  pub let EXIT_TOO_MANY_REDIRECTS    : u64 = 12
+
+}

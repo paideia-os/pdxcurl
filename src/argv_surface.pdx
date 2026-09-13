@@ -1,0 +1,106 @@
+// src/argv_surface.pdx -- pdxcurl v1.2.0 (Wave V drain: pdxcurl#2)
+// ArgvSurface module: flag-name rodata + argc bounds for M1-002.
+//
+// Purpose
+// -------
+// pdxcurl-design.md §5 defines the CLI surface:
+//
+//   pdxcurl [ -X METHOD | --method METHOD ]
+//           [ -o | --output FILE ]
+//           [ -d | --data BODY ]
+//           [ -H | --header 'K: V' ]     (repeatable)
+//           [ -t | --trust CAP-URI ]
+//           [ --dry-run ]
+//           [ --audit-only ]
+//           <url>
+//
+// v1.2.0 lands the flag-name literals + wire byte counts as .rodata
+// so:
+//   (a) a future libpdx-argv wire-in (deps: bump at pdxcurl#2
+//       parser-body close) binds against these symbols rather than
+//       re-embedding the literals;
+//   (b) the parser body at M1-002-real writes
+//       `cmp [rsi+X], [rip+FL_OUTPUT]` etc. without duplicating
+//       the string in every branch;
+//   (c) length-first comparisons short-circuit fast (the parser
+//       loads the sibling `_LEN` u64, compares argv-slot strlen
+//       against it, then bails cheaply on a length mismatch).
+//
+// v1.2.0 does NOT land the argv-parser BODY: that requires either
+// libpdx-argv M1 (scan_options) or a hand-rolled scanner. Both are
+// tracked separately and remain open. Landing the rodata half now
+// unblocks parallel work on the parser without churning the
+// flag-name namespace when the parser lands.
+//
+// Argc bounds
+// -----------
+//   ARGV_MIN = 2  (pdxcurl <url>)
+//   ARGV_MAX = 32 (design-doc §5.2 cap: -X + --output + --data +
+//                  --trust + --dry-run + --audit-only + up to 12
+//                  repeated --header pairs + <url> + argv[0] = 30
+//                  slots, +2 slack. A run with argc > ARGV_MAX
+//                  exits 2 without parsing.)
+//
+// paideia-as compliance
+// ---------------------
+//   - Module ArgvSurface (PascalCase file basename).
+//   - No function bodies -> no register plan, no encoder guardrails.
+//   - Array size == byte count INCLUDING trailing NUL. Sibling
+//     `_LEN` is the WIRE byte count (excludes NUL) so a length-
+//     first compare against a NUL-terminated argv slot works
+//     directly (strlen(argv[i]) == FL_OUTPUT_LEN then memcmp).
+//   - Every long flag (`--method`, ...) paired with its short form
+//     (`-X`, `-o`, `-d`, `-H`, `-t`) per design-doc §5.1 table.
+//   - Method-value canonical strings (GET / POST / HEAD / PUT /
+//     DELETE) also .rodata so the value-side of `-X METHOD` uses
+//     the same length-first compare shape.
+//   - u64 storage for every length so a load is one aligned
+//     `mov r64, [rip + LABEL]`.
+
+module ArgvSurface = structure {
+
+  // ---- argv bounds ----
+  pub let ARGV_MIN : u64 = 2
+  pub let ARGV_MAX : u64 = 32
+
+  // ---- long-form flag names (NUL-terminated; _LEN = wire bytes) ----
+  pub let FL_METHOD          : [u8; 9]  = "--method\0"
+  pub let FL_METHOD_LEN      : u64      = 8
+  pub let FL_OUTPUT          : [u8; 9]  = "--output\0"
+  pub let FL_OUTPUT_LEN      : u64      = 8
+  pub let FL_DATA            : [u8; 7]  = "--data\0"
+  pub let FL_DATA_LEN        : u64      = 6
+  pub let FL_HEADER          : [u8; 9]  = "--header\0"
+  pub let FL_HEADER_LEN      : u64      = 8
+  pub let FL_TRUST           : [u8; 8]  = "--trust\0"
+  pub let FL_TRUST_LEN       : u64      = 7
+  pub let FL_DRY_RUN         : [u8; 10] = "--dry-run\0"
+  pub let FL_DRY_RUN_LEN     : u64      = 9
+  pub let FL_AUDIT_ONLY      : [u8; 13] = "--audit-only\0"
+  pub let FL_AUDIT_ONLY_LEN  : u64      = 12
+
+  // ---- short-form flag names ----
+  pub let FL_SHORT_METHOD    : [u8; 3]  = "-X\0"
+  pub let FL_SHORT_METHOD_LEN : u64     = 2
+  pub let FL_SHORT_OUTPUT    : [u8; 3]  = "-o\0"
+  pub let FL_SHORT_OUTPUT_LEN : u64     = 2
+  pub let FL_SHORT_DATA      : [u8; 3]  = "-d\0"
+  pub let FL_SHORT_DATA_LEN  : u64      = 2
+  pub let FL_SHORT_HEADER    : [u8; 3]  = "-H\0"
+  pub let FL_SHORT_HEADER_LEN : u64     = 2
+  pub let FL_SHORT_TRUST     : [u8; 3]  = "-t\0"
+  pub let FL_SHORT_TRUST_LEN : u64      = 2
+
+  // ---- method-name canonical strings (for -X/--method value match) ----
+  pub let METHOD_GET         : [u8; 4]  = "GET\0"
+  pub let METHOD_GET_LEN     : u64      = 3
+  pub let METHOD_POST        : [u8; 5]  = "POST\0"
+  pub let METHOD_POST_LEN    : u64      = 4
+  pub let METHOD_HEAD        : [u8; 5]  = "HEAD\0"
+  pub let METHOD_HEAD_LEN    : u64      = 4
+  pub let METHOD_PUT         : [u8; 4]  = "PUT\0"
+  pub let METHOD_PUT_LEN     : u64      = 3
+  pub let METHOD_DELETE      : [u8; 7]  = "DELETE\0"
+  pub let METHOD_DELETE_LEN  : u64      = 6
+
+}

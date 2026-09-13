@@ -10,9 +10,112 @@ Version discipline:
   v1.1.0 -- unsigned source-tag release (2026-09-13). STUB body +
              v1.1-B semantic-pipe emission wire + M4-002/003/004
              honest-blockage witnesses + PDX_TOOL_NAME extern.
-  v1.2.0 -- reserved for the M5-001 dual-signed release-source
-             landing (pdxcurl#18), following the pdxsock precedent.
+  v1.2.0 -- unsigned source-tag release (2026-09-13). Wave V
+             foundation drain: M1-001 scaffold reconciled, M1-002
+             argv-surface rodata half, M1-003 --dry-run rodata
+             reservation, M3-003 semantic-pipe honest witness,
+             M3-005 error-taxonomy rodata namespace.
+  v1.3.0 -- reserved for the M5-001 dual-signed release-source
+             landing (pdxcurl#18), following the pdxsock precedent
+             (slid one minor from v1.2.0 to collect more drain).
 -->
+
+## [1.2.0] -- 2026-09-13 -- Wave V drain (unsigned source-tag)
+
+### Added
+
+- **Error taxonomy rodata namespace (pdxcurl#12, M3-005).** New
+  `src/error_taxonomy.pdx` module `ErrorTaxonomy` publishes the
+  `RC_*` result_code enum (13 values, RC_OK..RC_INTENT) and the
+  `EXIT_*` exit-code namespace (11 values) as `pub let ... : u64`
+  .rodata constants. Every failure mode maps to a distinct pair
+  per design-doc §7 -- DNS_FAILED (RC=1, EXIT=6), CONN_REFUSED
+  (RC=2, EXIT=7), TLS_KEY_MISMATCH (RC=3, EXIT=8), TLS_HANDSHAKE_
+  FAILED (RC=4, EXIT=9), HTTP_4XX (RC=5, EXIT=4), HTTP_5XX (RC=6,
+  EXIT=5), TIMEOUT (RC=7, EXIT=11), TOO_MANY_REDIRECTS (RC=8,
+  EXIT=12), NO_PERMISSION (RC=9, EXIT=3), DRY_RUN (RC=10, EXIT=0),
+  AUDIT_ONLY (RC=11, EXIT=0), INTENT (RC=12, v1.1-B witness only).
+  u64 storage even though wire fields are u32/u8 so a call-site
+  load is one aligned `mov r64, [rip + LABEL]` (proven encoder
+  pattern at src/main.pdx line 176 for the schema tag). Wire-in
+  at each emit site lands per-milestone as pdxcurl#5..#11 close.
+
+- **Argv-surface rodata namespace (pdxcurl#2, M1-002 partial).**
+  New `src/argv_surface.pdx` module `ArgvSurface` publishes the
+  flag-name literals (`--method`, `--output`, `--data`, `--header`,
+  `--trust`, `--dry-run`, `--audit-only`) plus their short-form
+  aliases (`-X`, `-o`, `-d`, `-H`, `-t`) plus the canonical HTTP
+  method value strings (GET / POST / HEAD / PUT / DELETE) plus
+  argc bounds (ARGV_MIN=2, ARGV_MAX=32) as .rodata. Every flag
+  literal carries a sibling `_LEN` u64 with the wire byte count
+  (excludes trailing NUL) so a length-first argv-slot comparison
+  short-circuits fast. This is the rodata HALF of pdxcurl#2 --
+  the parser BODY (the scan loop that binds flags to state)
+  requires libpdx-argv M1 scan_options() to land or a hand-rolled
+  scanner; landing the namespace now unblocks parallel parser
+  work without churning the flag names at parser-landing time.
+
+- **--dry-run diagnostic rodata reservation (pdxcurl#3, M1-003
+  partial).** `src/main.pdx` now declares `curl_msg_dry_run_stub`
+  (`pdxcurl: --dry-run, no network I/O run\n`, 39 wire bytes) as
+  a `pub let` rodata slot. Referenced by no _start path at
+  v1.2.0; landed so the future --dry-run body (blocked on
+  pdxcurl#2 parser) is a single call-site edit rather than a
+  rodata edit here. Emission contract documented at the
+  declaration: parser detects `--dry-run`, marshals the HRR as
+  it would emit it (`result_code = RC_DRY_RUN = 10`), writes
+  this diagnostic to fd 2, exits `EXIT_OK = 0`.
+
+- **M3-003 semantic-pipe emit honest-witness note (pdxcurl#10).**
+  Comment-only edit to `src/main.pdx` documenting what the v1.1-B
+  emission wire does NOT yet fill (method_and_scheme, status,
+  body_bytes, header_count, redirect_count, real result_code,
+  paired RESULT record) and which upstream landings unblock each
+  field. The v1.2.0 emit is deliberately UNCHANGED from v1.1.0 so
+  downstream consumers keep parsing HRR records against the
+  v1.1-B fingerprint; the real per-request emit lands as an EDIT
+  of this file once pdxcurl#5 / #8 / #9 clear.
+
+- **M1-001 scaffold formally closed (pdxcurl#1).** Reconciliation
+  entry -- the scaffold already landed at v1.1.0 (caps.decl,
+  link.ld, tools/build.sh, src/main.pdx STUB, tests/, manifest.
+  pdxproj). Wave V closes pdxcurl#1 in the tracker to match the
+  shipped state.
+
+- **Manifest bump.** `version = 1.2.0`. `sources:` extended with
+  `src/error_taxonomy.pdx` + `src/argv_surface.pdx`. Scope
+  comment rewritten to name the Wave V drain contents +
+  everything v1.2.0 deliberately does not ship (v1.3.0 remains
+  the target for the M5-001 dual-signed release-source landing;
+  slid one minor from v1.2.0).
+
+- **PDX_TOOL_VERSION bumped.** `src/tool_ident.pdx` -->
+  `"1.2.0\0"` (same 6-byte array size; libpdx-argv resolves the
+  UND ref against the new value at whatever future point the
+  argv scanner lands).
+
+- **Release-note + manifest source form.** `release/RELEASE-
+  1.2.0.md` (operator note for cutting the `v1.2.0` tag) and
+  `release/manifest.pdxsig.txt` refreshed to v1.2.0 UNSIGNED
+  source-tag shape (new source files added to
+  `[artifacts.source]`; every hash slot still placeholder).
+
+### Deferred (not shipped at v1.2.0)
+
+- Argv parser BODY (pdxcurl#2 parser-side); real HTTP/HTTPS
+  bodies (pdxcurl#5..#9, #11, #13); redirect chain (pdxcurl#17);
+  dual-signed release (pdxcurl#18, slid to v1.3.0); mirror push
+  (pdxcurl#19).
+
+### Encoder discipline
+
+Every new `.pdx` in this release honours the paideia-as 0.36+
+pitfalls per user memory `pdx encoder pitfalls`: module name =
+PascalCase file basename (`ErrorTaxonomy`, `ArgvSurface`); no
+function bodies -> no register plan needed; array size =
+literal byte count including NUL, `_LEN` sibling = wire byte
+count excluding NUL; single-line string literals throughout;
+u64 storage for every enum / length constant.
 
 ## [1.1.0] -- 2026-09-13 -- Wave M drain (unsigned source-tag)
 
