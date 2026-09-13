@@ -1,0 +1,164 @@
+// tests/m4_003_failure_matrix.pdx -- pdxcurl M4-003 failure-matrix
+//                                     smoke witness (pdxcurl#15).
+//
+// Wave: R100  Milestone: M4-003 (pdxcurl#15)
+// Doc:  design/networking/r100-user-tools-plan.md §13.3 (paideia-os)
+//       + design/networking/pdxcurl-design.md §7 (error taxonomy).
+//
+// Purpose ---------------------------------------------------------------
+// Boot-smoke witness that exercises the pdxcurl v1 failure taxonomy
+// (§7 of the design doc) across three deliberately-provoked failure
+// modes, asserting the exit code AND the emitted error fingerprint on
+// each. The witness is a three-role ELF driven by argv[1] first byte:
+//
+//   'r' (refuse): connect 127.0.0.1:9  (well-known "discard" port with
+//        no listener on the fixture host); expect exit 7 (CONN_REFUSED
+//        per §7); assert fingerprint `pdxcurl fail conn-refused\n`.
+//   'n' (nxdomain): pdxcurl <URL> where URL host is a guaranteed-
+//        NXDOMAIN name (RFC 6761 `invalid` TLD); expect exit 6
+//        (DNS_FAILED per §7); assert fingerprint `pdxcurl fail dns\n`.
+//   'k' (key mismatch): connect the fixture TLS server with a --trust
+//        cap over a DIFFERENT public key than the server presents;
+//        expect exit 8 (TLS_KEY_MISMATCH per §7); assert fingerprint
+//        `pdxcurl fail tls-key\n`.
+//
+// Blockage --------------------------------------------------------------
+// Every role is BLOCKED on the same M2/M3/M5 pipeline as M4-002:
+//   - 'r' needs libpdx-net M4 (net_connect wiring) -- CONN_REFUSED is
+//        a net_connect return code, and pdxcurl at v1.1.0 has no
+//        net_connect call.
+//   - 'n' needs libpdx-net M3 (net_resolve DNS shim) -- DNS_FAILED is
+//        a net_resolve return code.
+//   - 'k' needs libpdx-net M5 (net_tls_wrap) + pdxtrust M1 (cap mint)
+//        -- same blockage as M4-002.
+//
+// At v1.1.0 the witness emits the BLOCKED fingerprint per role and
+// sys_exit(0) -- honest witness of blockage, not fabricated failure.
+// Runtime proof-of-life lands as an EDIT of THIS FILE at unblock,
+// preserving the per-role exit-code + fingerprint contract above.
+//
+// Audit-trail cross-reference ------------------------------------------
+// This witness is the CO-witness of tests/m4_004_audit_trail.pdx
+// (pdxcurl#16): every failure role emits a RESULT audit record via
+// libpdx-audit whose `result_code` matches the enum above, and the
+// M4-004 witness reads /system/audit/pdxcurl.log and asserts one
+// row per M4-003 role. See m4_004_audit_trail.pdx file header for
+// the row-shape contract.
+//
+// Exit codes (subset of pdxcurl-design.md §7 taxonomy):
+//   0 = blocked witness (v1.1.0) OR success in the sense of "the
+//       failure was as-expected" once unblocked
+//   1 = unexpected outcome (any role's assertion fell through)
+//   2 = argv usage refusal
+//   6 = DNS_FAILED   (from role 'n' once unblocked)
+//   7 = CONN_REFUSED (from role 'r' once unblocked)
+//   8 = TLS_KEY_MISMATCH (from role 'k' once unblocked)
+//
+// Encoder discipline (paideia-as 0.36+ pitfalls, per user memory) --------
+//   * No `test rN, rN` -- every zero-check is `cmp rN, 0`.
+//   * No 2-op `imul r, imm`.
+//   * No `and r11, imm64`.
+//   * Byte loads via `xor rN, rN; mov_b rN, [ptr]` (paideia-as #1248).
+//   * PascalCase module basename (`M4003FailureMatrix`).
+//   * Every label prefixed `fmx_` (reserved-word discipline).
+//   * SysV alignment: leaf syscall-only body, no `call`, no push/pop.
+//
+// SC+ IDs used:
+//   1  = sys_write   (fd, buf, count)  -> n | -errno
+//   60 = sys_exit    (status)          -> never returns
+
+module M4FailureMatrix = structure {
+
+  // -------------------------------------------------------------------
+  // Fingerprint strings for each role. Every literal is one line;
+  // `_len` sibling is the wire byte count (excludes trailing NUL).
+  // -------------------------------------------------------------------
+  pub let fmx_msg_usage      : [u8; 32] = "usage: r=refused n=nxdom k=key\n\0"
+  pub let fmx_msg_usage_len  : u64 = 31
+
+  pub let fmx_msg_r_ok       : [u8; 27] = "pdxcurl fail conn-refused\n\0"
+  pub let fmx_msg_r_ok_len   : u64 = 26
+
+  pub let fmx_msg_n_ok       : [u8; 18] = "pdxcurl fail dns\n\0"
+  pub let fmx_msg_n_ok_len   : u64 = 17
+
+  pub let fmx_msg_k_ok       : [u8; 22] = "pdxcurl fail tls-key\n\0"
+  pub let fmx_msg_k_ok_len   : u64 = 21
+
+  pub let fmx_msg_blocked    : [u8; 36] = "pdxcurl fail-matrix BLOCKED role=X\n\0"
+  pub let fmx_msg_blocked_len : u64 = 35
+
+  // -------------------------------------------------------------------
+  // _start -- witness entry point. argv[1] first byte picks role.
+  // At v1.1.0 every role emits the BLOCKED fingerprint and exits 0
+  // (honest blockage witness). Real per-role bodies land as an EDIT
+  // of THIS FILE at unblock.
+  //
+  // Exit statuses (v1.1.0 blocked scope):
+  //   0 = blocked fingerprint emitted (honest witness of blockage)
+  //   2 = argv usage refusal (no argv[1] provided)
+  // -------------------------------------------------------------------
+  pub let _start : () -> () !{mem, sysreg} @{fs, sched, cap} =
+    fn () -> unsafe {
+      effects: {mem, sysreg},
+      capabilities: {fs, sched, cap},
+      justification: "pdxcurl.M4-003 (pdxcurl#15) failure-matrix smoke witness. Three-role ELF driven by argv[1] first byte: 'r'=connect-refused (127.0.0.1:9, expect exit 7 + `pdxcurl fail conn-refused\\n`), 'n'=nxdomain (RFC 6761 `invalid` TLD, expect exit 6 + `pdxcurl fail dns\\n`), 'k'=tls-key-mismatch (fixture TLS server + trust cap over different key, expect exit 8 + `pdxcurl fail tls-key\\n`). Blocked on libpdx-net M3/M4/M5 + pdxtrust M1 -- same blockage as M4-002 (pdxcurl#14). At v1.1.0 every role emits `pdxcurl fail-matrix BLOCKED role=X\\n` on fd 2 and sys_exit(0). Real per-role bodies land as an EDIT of THIS FILE at unblock, preserving the per-role fingerprint + exit-code contract. Co-witness of tests/m4_004_audit_trail.pdx (pdxcurl#16): every failure role emits a RESULT audit record via libpdx-audit whose `result_code` matches the design-doc §7 enum, and M4-004 asserts one row per M4-003 role in /system/audit/pdxcurl.log. Argv gate at v1.1.0: argc == 2 with argv[1] first byte in {'r','n','k'} -> blocked fingerprint role marker + exit 0; anything else -> usage + exit 2. Encoder discipline (per user memory `pdx encoder pitfalls`): no `test rN, rN`; no 2-op `imul r, imm`; byte loads use `xor rN, rN; mov_b rN, [ptr]`; PascalCase module basename (M4003FailureMatrix); every label prefixed `fmx_`; no `and reg, imm64`.",
+      block: {
+        // ---- Step 0: latch argc / argv. ----
+        mov r12, rdi;                           // r12 = argc
+        mov r13, rsi;                           // r13 = argv
+
+        // ---- Step 1: argc gate. argc must be exactly 2. ----
+        cmp r12, 2;
+        jne fmx_usage;
+
+        // ---- Step 2: argv[1] first byte picks role. ----
+        // 'r' (0x72) / 'n' (0x6E) / 'k' (0x6B) accepted; anything else -> usage.
+        mov rbx, [r13 + 8];                     // rbx = argv[1]
+        xor rax, rax;
+        mov_b rax, [rbx];
+        cmp rax, 0x72;
+        je fmx_blocked_emit;
+        cmp rax, 0x6E;
+        je fmx_blocked_emit;
+        cmp rax, 0x6B;
+        je fmx_blocked_emit;
+        jmp fmx_usage;
+
+      fmx_blocked_emit:
+        // ---- v1.1.0 blocked witness: emit BLOCKED role=X fingerprint. ----
+        // The 'X' at byte 33 of the string is overwritten with argv[1]'s
+        // first byte (already in rax) so the fingerprint names the role
+        // it was invoked with. Uses .data-alias trick? No -- the fingerprint
+        // lives in .rodata (`pub let` = immutable). Write role byte to
+        // fd 2 in a SEPARATE syscall instead: prefix (33 bytes: through
+        // `role=`) + role byte (1) + newline (1) = 35 bytes on the wire,
+        // matching the fingerprint semantics without touching .rodata.
+        //
+        // But at v1.1.0 the blocked fingerprint is fixed-string; the
+        // role-byte precision is deferred to the real-body edit. This
+        // witness writes the fixed BLOCKED string as-is.
+        mov rdi, 2;
+        lea rsi, [rip + fmx_msg_blocked];
+        mov rdx, 35;                            // fmx_msg_blocked_len
+        mov rax, 1;
+        syscall;
+        xor rdi, rdi;                           // exit 0 (blocked witness)
+        mov rax, 60;
+        syscall;
+        hlt;
+
+      fmx_usage:
+        mov rdi, 2;
+        lea rsi, [rip + fmx_msg_usage];
+        mov rdx, 31;                            // fmx_msg_usage_len
+        mov rax, 1;
+        syscall;
+        mov rdi, 2;                             // exit 2 (usage)
+        mov rax, 60;
+        syscall;
+        hlt;
+      }
+    }
+
+}

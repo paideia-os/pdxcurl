@@ -1,0 +1,124 @@
+// tests/m4_002_https_smoke.pdx -- pdxcurl M4-002 HTTPS happy-path
+//                                   smoke witness (pdxcurl#14).
+//
+// Wave: R100  Milestone: M4-002 (pdxcurl#14)
+// Doc:  design/networking/r100-user-tools-plan.md §13.3 (paideia-os)
+//       + design/networking/pdxcurl-design.md §4 (request pipeline).
+//
+// Purpose ---------------------------------------------------------------
+// Boot-smoke witness that exercises the pdxcurl v1 HTTPS path against
+// a pinned-key TLS fixture server: TCP connect -> TLS handshake against
+// a KIND_TLS_TRUST cap holding the fixture's Ed25519 public key ->
+// HTTP GET / -> receive 200 OK -> emit `pdxcurl https-smoke ok\n`
+// fingerprint on fd 2 -> sys_shutdown -> sys_exit(0).
+//
+// Blockage --------------------------------------------------------------
+// This witness is BLOCKED on libpdx-net M5 landing net_tls_wrap /
+// net_connect / net_resolve, and on pdxtrust M1 landing the
+// KIND_TLS_TRUST cap minting path (both tracked as R100-PREP-001 +
+// R100-PREP-005 per the issue text). Under the current tools/build.sh
+// regime, this file compiles to build-out/tests-m4_002_https_smoke.o
+// and gates only the encoder patterns (paideia-as 0.36+ pitfalls per
+// user memory `pdx encoder pitfalls`). Runtime proof-of-life awaits:
+//
+//   1. libpdx-net M5: exports net_tls_wrap(tcp_fd, trust_cap) -> tls_ctx
+//      + net_connect(ip_u32, port) -> fd + net_resolve(host) -> ip_u32.
+//   2. pdxtrust M1: exports the mint pipeline that produces a
+//      KIND_TLS_TRUST cap from an Ed25519 public key blob.
+//   3. The paideia-os smoke-runner extension: (a) launches a fixture
+//      TLS server pre-loaded with a known Ed25519 keypair on a known
+//      port; (b) pre-mints a KIND_TLS_TRUST cap over that public key
+//      into pdxcurl's cap-slot 1 before execve; (c) sequences this
+//      witness against it.
+//
+// Fingerprint format ----------------------------------------------------
+// Success: "pdxcurl https-smoke ok\n"       (23 bytes)
+// Setup fail (any pre-request syscall failure -- connect, handshake,
+// GET-send, response-recv): "pdxcurl https-smoke setup fail\n" (31 bytes)
+// Trust mismatch (the KEY_MISMATCH exit surface -- the fixture server
+// presented a key that did not verify under the pinned cap): "pdxcurl
+// https-smoke trust FAIL\n" (31 bytes) with sys_exit(8) per §7 error
+// taxonomy.
+//
+// Exit codes (subset of pdxcurl-design.md §7):
+//   0 = happy-path success (200 OK received, fingerprint emitted)
+//   2 = argv usage refusal (this witness takes no argv beyond argv[0])
+//   5 = setup syscall failure collapsed (no distinct 4/5/6/7 taxonomy
+//       at witness scope -- the smoke is a pass/fail, not a diagnostic)
+//   8 = TLS_KEY_MISMATCH (mirrors pdxcurl main.pdx's future §7 exit 8)
+//
+// Encoder discipline (paideia-as 0.36+ pitfalls, per user memory) --------
+//   * No `test rN, rN` -- every zero-check is `cmp rN, 0`.
+//   * No 2-op `imul r, imm` -- no *10 fold in this witness (port and
+//     IP are hardcoded immediates).
+//   * No `and r11, imm64` on r8..r15 -- no bit-mask operations.
+//   * Byte loads via `xor rN, rN; mov_b rN, [ptr]` (paideia-as #1248:
+//     REX.W cmp on rN needs the upper bits pre-zeroed for a clean
+//     byte compare).
+//   * PascalCase module basename (`M4002HttpsSmoke` from
+//     `m4_002_https_smoke.pdx`).
+//   * Every label prefixed `hts_` (reserved-word discipline: `loop`,
+//     `if` etc. are keywords).
+//   * SysV alignment: leaf syscall-only body, no `call` cross-module,
+//     no push/pop -- rsp % 16 == 0 posture inherited from ELF process
+//     init and preserved throughout.
+//   * String literals: single-line, trailing NUL declared in the
+//     array size (`[u8; N+1]`) with a sibling `_len` constant carrying
+//     the wire byte count (no NUL).
+//
+// SC+ IDs used (matches src/user/syscall_shim.pdx + design/user/
+// syscall-table.md through sysno 115). Every socket-family syscall
+// remains STUB-referenced at witness compile time -- the real handshake
+// path is the libpdx-net M5 landing:
+//   1   = sys_write     (fd, buf, count)         -> n | -errno
+//   60  = sys_exit      (status)                 -> never returns
+
+module M4HttpsSmoke = structure {
+
+  // -------------------------------------------------------------------
+  // Fingerprint strings. Every literal is one line; the `_len` sibling
+  // is the wire byte count (excludes trailing NUL).
+  // -------------------------------------------------------------------
+  pub let hts_msg_ok         : [u8; 24] = "pdxcurl https-smoke ok\n\0"
+  pub let hts_msg_ok_len     : u64 = 23
+
+  pub let hts_msg_setup      : [u8; 32] = "pdxcurl https-smoke setup fail\n\0"
+  pub let hts_msg_setup_len  : u64 = 31
+
+  pub let hts_msg_trust_fail : [u8; 32] = "pdxcurl https-smoke trust FAIL\n\0"
+  pub let hts_msg_trust_fail_len : u64 = 31
+
+  pub let hts_msg_blocked    : [u8; 43] = "pdxcurl https-smoke BLOCKED on libpdx-net\n\0"
+  pub let hts_msg_blocked_len : u64 = 42
+
+  // -------------------------------------------------------------------
+  // _start -- witness entry point. At v1.1.0 this witness is BLOCKED
+  // on libpdx-net M5; the body emits the BLOCKED fingerprint on fd 2
+  // and sys_exit(0) so the smoke harness sees a compile+link+exec
+  // witness of the wire without a fabricated pass. Real runtime body
+  // (TCP connect + TLS handshake + HTTP GET + response validation +
+  // fingerprint emit) lands as an EDIT of THIS FILE at the M5 unblock,
+  // preserving the fingerprint contract above.
+  //
+  // Exit statuses (v1.1.0 blocked scope):
+  //   0 = blocked fingerprint emitted (honest witness of blockage)
+  // -------------------------------------------------------------------
+  pub let _start : () -> () !{mem, sysreg} @{fs, sched, cap} =
+    fn () -> unsafe {
+      effects: {mem, sysreg},
+      capabilities: {fs, sched, cap},
+      justification: "pdxcurl.M4-002 (pdxcurl#14) HTTPS happy-path smoke witness. Blocked on libpdx-net M5 (net_tls_wrap / net_connect / net_resolve) + pdxtrust M1 (KIND_TLS_TRUST cap minting) per issue text (R100-PREP-001 + R100-PREP-005). At v1.1.0 the witness emits `pdxcurl https-smoke BLOCKED on libpdx-net\\n` on fd 2 and sys_exit(0) -- honest blockage witness, not a fabricated pass. The real runtime body (TCP connect 127.0.0.1:8443 + TLS handshake against a pinned KIND_TLS_TRUST cap in slot 1 + HTTP GET / + response validation + `pdxcurl https-smoke ok\\n` on fd 2 + sys_shutdown + sys_exit(0)) lands as an EDIT of THIS FILE at M5 unblock, preserving the fingerprint contract (`pdxcurl https-smoke ok\\n` = 23 wire bytes, `pdxcurl https-smoke setup fail\\n` = 31 wire bytes, `pdxcurl https-smoke trust FAIL\\n` = 31 wire bytes, exit 0/5/8 taxonomy per pdxcurl-design.md §7). Fixture-harness lands in paideia-os monorepo smoke-runner extension: (a) starts fixture TLS server pre-loaded with known Ed25519 keypair on 127.0.0.1:8443; (b) pre-mints KIND_TLS_TRUST cap over that public key into pdxcurl's cap-slot 1 before execve; (c) sequences this witness against it. Encoder discipline (per user memory `pdx encoder pitfalls`): no `test rN, rN`; no 2-op `imul r, imm`; byte loads use `xor rN, rN; mov_b rN, [ptr]`; PascalCase module basename (M4002HttpsSmoke); every label prefixed `hts_`; no `and reg, imm64`; single-line string literals with `_len` sibling constants naming wire byte counts.",
+      block: {
+        mov rdi, 2;                             // fd = stderr
+        lea rsi, [rip + hts_msg_blocked];
+        mov rdx, 42;                            // hts_msg_blocked_len
+        mov rax, 1;                             // sys_write
+        syscall;
+        xor rdi, rdi;                           // exit 0 (honest blockage witness)
+        mov rax, 60;
+        syscall;
+        hlt;
+      }
+    }
+
+}

@@ -1,0 +1,41 @@
+# pdxcurl -- caps.decl
+#
+# Format: R90-XREPO.013.M1-001 line-oriented caps.decl grammar
+# (paideia-os design/architecture/caps-decl-format.md).
+#
+# `!KIND_FOO <mask>` = mandatory: exec fails -EACCES if the parent's
+# cap-set does not hold at least this mask. ` KIND_FOO <mask>` (no
+# `!`) = optional: narrowed to at most this mask, dropped to zero if
+# the parent held none.
+#
+# pdxcurl's role: capability-native improved-curl (paideia-os
+# design/networking/pdxcurl-design.md §8 + design/networking/
+# r100-user-tools-plan.md §12.3). At v1.1.0 the tool body is a
+# STUB argv-refusing entry with the v1.1-B semantic-pipe emission
+# wire landed (pdxcurl#21) -- real M2/M3 (HTTP-only GET, TLS
+# handshake, audit INTENT/RESULT pair) is tracked as pdxcurl#5..#12
+# and blocked on libpdx-net M5 landing the net_tls_wrap /
+# net_connect wire. The caps.decl is authored at v1.1.0 to the
+# design-doc-final surface so no caps.decl churn is needed as M2/M3
+# real bodies land.
+#
+# Kind rationale:
+#   KIND_USER          -- invoker attribution (audit record identity);
+#                         every satellite in the R100 wave lists this.
+#   KIND_TLS_TRUST     -- optional at v1.1.0 (no https body wired);
+#                         mandatory once M3-001 (pdxcurl#8) lands the
+#                         --trust= cap resolution + net_tls_wrap call.
+#                         Placeholder 0x1A7 per parent plan §12.3.
+#   KIND_IPC_ENDPOINT  -- optional; documentation-only at v1.1-B.
+#                         The v1.1-B semantic-pipe emission wire
+#                         uses sys_semantic_send (SC+ ID 115) which
+#                         takes NO cap slot. Retained for a future
+#                         KIND_SEMANTIC_PIPE recv-side cap.
+#   KIND_ELEVATE_CHANNEL -- deliberately absent from this decl per
+#                         design/networking/pdxcurl-design.md §8:
+#                         no elevate gate on an HTTP/HTTPS client
+#                         request at v1.
+
+!KIND_USER               0x001   # invoker attribution (audit)
+ KIND_TLS_TRUST          0x001   # optional -- v1.1.0 stub; M3-001 (pdxcurl#8) real
+ KIND_IPC_ENDPOINT       0x001   # optional -- documentation-only (see above)

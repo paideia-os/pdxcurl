@@ -1,0 +1,80 @@
+# pdxcurl v1.1.0 -- release manifest (source form, UNSIGNED)
+#
+# This is the human-readable source form of `manifest.pdxsig`. At
+# v1.1.0 the manifest is UNSIGNED -- no `[signatures]` block is
+# present, and every `<BLAKE3-*>` slot is a placeholder-until-fill
+# the future v1.2.0 dual-signed release-source landing (pdxcurl#18,
+# M5-001) will populate. The v1.1.0 tag is a source-only anchor for
+# the Wave M drain; the pdxsock v1.1.0 precedent (unsigned source-
+# tag followed by signed v1.2.0) is the template this follows.
+#
+# Reference:
+#   design/paideia-as/v0.20-issue-1025-pq-signing.md         -- Hybrid,
+#     sign_release_artifact, HybridSignature (Ed25519 || ML-DSA-65).
+#   design/02-development-environment.md §1140                -- hybrid
+#     release-artifact signature rationale (Ed25519 + ML-DSA-65).
+#   design/tooling/plan.md §6.3                               -- package
+#     repository layout, `manifest.pdxsig` per version directory.
+#   design/networking/pdxcurl-design.md                       -- pdxcurl
+#     design.
+#   design/networking/r100-user-tools-plan.md §7 + §13.3      -- pdxcurl
+#     scope + the 21-issue milestone breakdown this closes the Wave
+#     M drain over.
+
+format-version:      1
+manifest-schema:     paideia-manifest-pdxsig@1
+package-name:        pdxcurl
+package-version:     1.1.0
+package-release:     R100-WaveM
+package-kind:        cli-tool
+package-license:     MIT
+source-repo:         https://github.com/paideia-os/pdxcurl
+source-commit:       <TAG-v1.1.0-COMMIT-SHA>   # release tool fills in at v1.2.0
+source-tag:          v1.1.0
+
+# ---------------------------------------------------------------
+# Artifact set -- every file the compiled package ships. The hash
+# discipline is BLAKE3-256, upper 32 bytes rendered as 64 hex chars.
+# At v1.1.0 (UNSIGNED source-tag) every slot below is a placeholder
+# the v1.2.0 dual-sign pass (M5-001, pdxcurl#18) will populate.
+# The order below is stable (lexicographic within each section) so
+# the concatenated hash-input is reproducible across signers.
+# ---------------------------------------------------------------
+
+[artifacts.source]
+caps.decl                          blake3-256 = <BLAKE3-caps.decl>
+src/main.pdx                       blake3-256 = <BLAKE3-main.pdx>
+src/tool_ident.pdx                 blake3-256 = <BLAKE3-tool_ident.pdx>
+
+[artifacts.tests]
+tests/m4_002_https_smoke.pdx       blake3-256 = <BLAKE3-m4_002_https_smoke.pdx>
+tests/m4_003_failure_matrix.pdx    blake3-256 = <BLAKE3-m4_003_failure_matrix.pdx>
+tests/m4_004_audit_trail.pdx       blake3-256 = <BLAKE3-m4_004_audit_trail.pdx>
+
+[artifacts.doc]
+# No doc/ tree at v1.1.0. .pdxdoc source lands at M5-001 (pdxcurl#18).
+
+[artifacts.meta]
+CHANGELOG.md                       blake3-256 = <BLAKE3-CHANGELOG.md>
+LICENSE                            blake3-256 = <BLAKE3-LICENSE>
+README.md                          blake3-256 = <BLAKE3-README.md>
+STATUS.md                          blake3-256 = <BLAKE3-STATUS.md>
+link.ld                            blake3-256 = <BLAKE3-link.ld>
+manifest.pdxproj                   blake3-256 = <BLAKE3-manifest.pdxproj>
+tools/build.sh                     blake3-256 = <BLAKE3-build.sh>
+
+# ---------------------------------------------------------------
+# Signature block -- absent at v1.1.0.
+#
+# The v1.2.0 dual-sign pass (M5-001, pdxcurl#18) adds:
+#
+#   [signatures.ed25519]
+#   key-id                = paideia-release-line-ed25519-<KID>
+#   signature             = <ED25519-SIG-96-HEX>
+#
+#   [signatures.mldsa65]
+#   key-id                = paideia-release-line-mldsa65-<KID>
+#   signature             = <MLDSA65-SIG-3309-HEX>
+#
+# following the mkfs.pdxfs / umount.pdxfs / pdxsock v1.2.0 template.
+# ---------------------------------------------------------------

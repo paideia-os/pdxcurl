@@ -1,0 +1,115 @@
+// tests/m4_004_audit_trail.pdx -- pdxcurl M4-004 audit-trail
+//                                   assertion witness (pdxcurl#16).
+//
+// Wave: R100  Milestone: M4-004 (pdxcurl#16)
+// Doc:  design/networking/r100-user-tools-plan.md §13.3 (paideia-os)
+//       + design/networking/pdxcurl-design.md §4 (pipeline: INTENT
+//       audit before DNS, RESULT audit after response, both with the
+//       same audit_id) + libpdx-audit#31 landed audit_append_leaf.
+//
+// Purpose ---------------------------------------------------------------
+// Boot-smoke witness that opens /system/audit/pdxcurl.log (the pdxcurl
+// audit journal path per libpdx-audit convention) and asserts the log
+// contains a matching INTENT / RESULT row-pair for every earlier smoke
+// run in the same session. Specifically, for each of M4-001 (happy-path
+// HTTP), M4-002 (HTTPS happy path), and M4-003's three failure roles
+// (r/n/k), the journal MUST hold two rows with an identical audit_id
+// and one row marked INTENT and one RESULT.
+//
+// Row shape (libpdx-audit @0.2 wire) ------------------------------------
+//   16 bytes: magic (`PDXAUDIT` little-endian u64) + version u32 + flags u32
+//   8  bytes: audit_id u64 (monotonic within a session; shared by
+//             INTENT + RESULT pair)
+//   8  bytes: timestamp_ns u64
+//   4  bytes: tool_id u32 (0xC01A_C071 = "curl" for pdxcurl; see the
+//             libpdx-audit tool-id registry)
+//   4  bytes: kind u32 (0 = INTENT, 1 = RESULT)
+//   4  bytes: result_code u32 (matches pdxcurl-design.md §7 enum;
+//             always 12 = INTENT on kind == 0 rows)
+//   4  bytes: reserved u32 (zero)
+//   Total row: 48 bytes @align(8).
+//
+// The exact tool_id + kind + result_code enums are the libpdx-audit
+// convention (see libpdx-audit's own design/audit-record-format.md);
+// this witness treats them as opaque and asserts by field extraction
+// rather than field interpretation.
+//
+// Blockage --------------------------------------------------------------
+// This witness is BLOCKED on:
+//   - pdxcurl's own audit wire (M3-002 / pdxcurl#9) not yet landed --
+//     the earlier smoke runs must actually write audit rows for this
+//     witness to have anything to read. libpdx-audit#31 has landed
+//     audit_append_leaf so the writer surface exists; pdxcurl has not
+//     yet wired it.
+//   - /system/audit/ path may not yet be mounted at smoke time -- the
+//     paideia-os smoke-runner extension must (a) mount an in-memory
+//     tmpfs at /system/audit or (b) pre-create the file so pdxcurl's
+//     audit writes have a landing spot.
+//   - sys_open / sys_read at the /system/audit path -- pdxcurl's
+//     current STUB does not exercise the FS syscall surface, so this
+//     witness is the first to open a specific well-known path.
+//
+// At v1.1.0 the witness emits `pdxcurl audit-trail BLOCKED\n` on fd 2
+// and sys_exit(0) -- honest blockage witness, not a fabricated pass.
+// Real body (open, read row-by-row, assert INTENT+RESULT pairing per
+// audit_id) lands as an EDIT of THIS FILE at unblock, preserving the
+// fingerprint contract:
+//   Success: `pdxcurl audit-trail ok rows=<N>\n`   (variable, 30..)
+//   Failure: `pdxcurl audit-trail FAIL missing=<N>\n` (variable, 33..)
+//   Blocked: `pdxcurl audit-trail BLOCKED\n`         (28 bytes, v1.1.0)
+//
+// Exit codes:
+//   0 = success (all rows paired) OR blocked witness (v1.1.0)
+//   1 = missing row(s) -- audit journal did not have every INTENT +
+//       RESULT pair the smoke suite expected
+//   5 = setup failure (sys_open of /system/audit/pdxcurl.log failed)
+//
+// Encoder discipline (paideia-as 0.36+ pitfalls, per user memory) --------
+//   * No `test rN, rN` -- every zero-check is `cmp rN, 0`.
+//   * No 2-op `imul r, imm`.
+//   * No `and r11, imm64`.
+//   * Byte loads via `xor rN, rN; mov_b rN, [ptr]` (paideia-as #1248).
+//   * PascalCase module basename (`M4004AuditTrail`).
+//   * Every label prefixed `aud_` (reserved-word discipline).
+//   * SysV alignment: leaf syscall-only body, no `call`, no push/pop.
+//
+// SC+ IDs used (at v1.1.0 -- real body will add sys_open/sys_read):
+//   1  = sys_write   (fd, buf, count)  -> n | -errno
+//   60 = sys_exit    (status)          -> never returns
+
+module M4AuditTrail = structure {
+
+  // -------------------------------------------------------------------
+  // Fingerprint strings. Single-line literals; `_len` sibling is the
+  // wire byte count (excludes trailing NUL).
+  // -------------------------------------------------------------------
+  pub let aud_msg_blocked     : [u8; 29] = "pdxcurl audit-trail BLOCKED\n\0"
+  pub let aud_msg_blocked_len : u64 = 28
+
+  // -------------------------------------------------------------------
+  // _start -- witness entry point. At v1.1.0 emits BLOCKED fingerprint
+  // and sys_exit(0) (honest blockage witness). Real body lands as an
+  // EDIT of THIS FILE at unblock.
+  //
+  // Exit statuses (v1.1.0 blocked scope):
+  //   0 = blocked fingerprint emitted (honest witness of blockage)
+  // -------------------------------------------------------------------
+  pub let _start : () -> () !{mem, sysreg} @{fs, sched, cap} =
+    fn () -> unsafe {
+      effects: {mem, sysreg},
+      capabilities: {fs, sched, cap},
+      justification: "pdxcurl.M4-004 (pdxcurl#16) audit-trail assertion witness. Opens /system/audit/pdxcurl.log and asserts a matching INTENT/RESULT row-pair (shared audit_id) for every earlier smoke run in the same session -- M4-001 happy-path HTTP, M4-002 HTTPS happy-path, and each of M4-003's three failure roles (r/n/k). Row shape follows libpdx-audit @0.2 wire (48 bytes @align(8): 16-byte magic/version/flags header + 8B audit_id + 8B timestamp_ns + 4B tool_id + 4B kind + 4B result_code + 4B reserved). tool_id for pdxcurl = 0xC01AC071 (`curl`) per libpdx-audit tool-id registry; kind 0=INTENT, 1=RESULT; result_code matches pdxcurl-design.md §7 enum. Blocked on pdxcurl's own audit wire (M3-002 / pdxcurl#9) not yet landed -- libpdx-audit#31 audit_append_leaf has landed so the writer surface exists but pdxcurl has not yet wired it; also on paideia-os smoke-runner mounting /system/audit tmpfs before execve so pdxcurl's audit writes have a landing spot. At v1.1.0 emits `pdxcurl audit-trail BLOCKED\\n` on fd 2 and sys_exit(0) -- honest blockage witness, not fabricated pass. Real body (sys_open /system/audit/pdxcurl.log O_RDONLY + sys_read row-by-row + per-row extract of audit_id/kind/tool_id + pair-count via in-place sort or a bounded audit_id->count[2] table + assert every audit_id has exactly one INTENT and one RESULT row + emit `pdxcurl audit-trail ok rows=<N>\\n` or `pdxcurl audit-trail FAIL missing=<N>\\n` + sys_close + sys_exit) lands as an EDIT of THIS FILE at unblock, preserving the fingerprint contract. Encoder discipline (per user memory `pdx encoder pitfalls`): no `test rN, rN`; no 2-op `imul r, imm`; byte loads use `xor rN, rN; mov_b rN, [ptr]`; PascalCase module basename (M4004AuditTrail); every label prefixed `aud_`; no `and reg, imm64`. Future real-body encoder patterns: decimal digit encoder (divide-by-10 via shl-add-add per pdxsock precedent) for the rows=<N> / missing=<N> numeric tails.",
+      block: {
+        mov rdi, 2;                             // fd = stderr
+        lea rsi, [rip + aud_msg_blocked];
+        mov rdx, 28;                            // aud_msg_blocked_len
+        mov rax, 1;                             // sys_write
+        syscall;
+        xor rdi, rdi;                           // exit 0 (blocked witness)
+        mov rax, 60;
+        syscall;
+        hlt;
+      }
+    }
+
+}

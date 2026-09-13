@@ -1,0 +1,236 @@
+// src/main.pdx -- pdxcurl v1.1.0 STUB body + v1.1-B semantic-pipe
+//                  emission wire (pdxcurl#21).
+//
+// pdxcurl: capability-native improved-curl CLI (design/networking/
+// pdxcurl-design.md in paideia-os). Ring-3 ELF entry point (`_start`),
+// argv-wired per the frozen execve ABI (design/user/execve-abi.md):
+//   rdi = argc, rsi = argv (VA of a char*[]), rdx = envp (unused),
+//   rsp % 16 == 0 at entry.
+//
+// v1.1.0 scope
+// ------------
+// Real-body wiring (M1-002 argv scanner, M2-001 libpdx-url integration,
+// M2-002 http_get, M3-001 net_tls_wrap, M3-002 libpdx-audit INTENT/
+// RESULT pair, M3-003 HttpRequestRecord@0.1 emit, M3-004 --audit-only,
+// M3-005 error taxonomy) is out of scope at v1.1.0 -- tracked as
+// pdxcurl#2..#12 and each blocked on its own libpdx-net / libpdx-url /
+// libpdx-audit / pdxtrust satellite landing. v1.1.0 lands:
+//   (a) STUB argv-refusing entry with the design-doc-final exit-code
+//       taxonomy (§7): exit 2 on any argv usage error, no network I/O.
+//   (b) v1.1-B semantic-pipe emission wire (pdxcurl#21): a stub
+//       HttpRequestRecord@0.1 marshalled into a 48-byte .bss buffer
+//       and emitted via sys_semantic_send (SC+ ID 115, paideia-os
+//       handler landed at R107-M0-001 #2350) so a downstream consumer
+//       can key off the schema tag before the real request path
+//       lands. `result_code = INTENT` at v1.1.0 (see §7 taxonomy);
+//       the record's other numeric fields are zero and become real
+//       when the M3-003 emit fills them from the response.
+//   (c) PDX_TOOL_NAME + PDX_TOOL_VERSION externs (see src/tool_ident.
+//       pdx) so libpdx-argv 1.1.3+ can pull tool identity by UND
+//       reference at whatever future point the argv scanner lands.
+//
+// Emission ordering (v1.1-B honest scope): the semantic-pipe emit
+// runs BEFORE the argv refusal at v1.1.0. This is inverted from the
+// design-doc-final ordering (§4 pipeline: INTENT record before DNS,
+// RESULT record after response). v1.1.0's emission is a witness
+// that the SC+ ID 115 wire compiles + links + accepts the pdxcurl
+// schema tag -- it is not the real per-request INTENT emission that
+// M3-003 (pdxcurl#10) will land. Consumers reading the ring at
+// v1.1.0 will see one HttpRequestRecord@0.1 with `result_code =
+// INTENT` and every numeric field zero, which is honestly no more
+// meaningful than "pdxcurl ran once"; the shape of the record is
+// what v1.1-B ships and what future consumers can start parsing
+// against.
+//
+// SockSes / HttpRequest schema-tag namespace note
+// -----------------------------------------------
+// The pdxsock precedent (0x536F636B53657301 = "SockSes" + version
+// 0x01) chose an 8-byte ASCII-mnemonic + version tail. pdxcurl
+// follows suit: 0x4874747052657101 = "HttpReq" + version 0x01. Both
+// are grep-friendly and stable pre-paideia-os#2000 (schema registry).
+//
+// Record shape (48 bytes, @align(8), fits in the sysno-115 240-byte
+// per-slot cap):
+//   [ +0]  magic            [u8; 8] -- "PDXKCURL" ASCII, little-endian
+//                                      u64 0x4C5255434B584450. Grep-
+//                                      friendly self-identifier for
+//                                      the pdxcurl generic-tool
+//                                      record family. Consumers key
+//                                      off this before parsing.
+//   [ +8]  version          u32     -- HRR_VERSION = 1 (v0.1 schema).
+//   [+12]  flags            u32     -- reserved; zero at v1.1.0.
+//   [+16]  method_and_scheme u32    -- packed. Low byte = method
+//                                      enum (0=GET, 1=POST, 2=HEAD,
+//                                      3=PUT, 4=DELETE), next byte =
+//                                      scheme enum (0=http, 1=https),
+//                                      upper 16 bits reserved.
+//                                      At v1.1.0 = 0 (no argv parse).
+//   [+20]  status           u32     -- HTTP response status (0 at
+//                                      v1.1.0 -- no request sent).
+//   [+24]  body_bytes       u64     -- response body length (0 at
+//                                      v1.1.0).
+//   [+32]  redirect_count   u32     -- number of redirects followed
+//                                      (0 at v1.1.0).
+//   [+36]  header_count     u32     -- number of request headers
+//                                      (0 at v1.1.0; --header wire
+//                                      lands at M2-something).
+//   [+40]  result_code      u32     -- error taxonomy value per
+//                                      §7 of the design doc. At
+//                                      v1.1.0 always INTENT (=12);
+//                                      future landings emit OK / DNS_
+//                                      FAILED / CONN_REFUSED / TLS_
+//                                      KEY_MISMATCH / TIMEOUT / etc.
+//   [+44]  reserved         u32     -- zero at v1.1.0.
+//
+// Result-code numbering (matches §7 exit-code discipline where the
+// exit code is orthogonal to the code enum; the enum below is
+// arbitrary but stable):
+//   0=OK, 1=DNS_FAILED, 2=CONN_REFUSED, 3=TLS_KEY_MISMATCH,
+//   4=TLS_HANDSHAKE_FAILED, 5=HTTP_4XX, 6=HTTP_5XX, 7=TIMEOUT,
+//   8=TOO_MANY_REDIRECTS, 9=NO_PERMISSION, 10=DRY_RUN, 11=AUDIT_ONLY,
+//   12=INTENT.
+//
+// Schema tag: 0x4874747052657101 -- "HttpReq" + version 0x01. Grep-
+// searchable stable u64 fingerprint. Consumers key off the leading
+// PDXKCURL magic + version for layout selection; the schema tag names
+// the record family for the ring-index side (`sys_semantic_send`'s
+// first-argument slot).
+//
+// Encoder discipline (paideia-as 0.36+ pitfalls, per user memory)
+// ---------------------------------------------------------------
+//   - No `test rN, rN` anywhere; every zero-check is `cmp rN, 0`.
+//   - No 2-op `imul r, imm`.
+//   - Byte loads via `xor rax, rax; mov_b rax, [ptr]` per src/user/
+//     cat.pdx (paideia-as #1248: cmp al, imm8 emits with REX.W so
+//     upper bits of rax must be zero before the byte compare).
+//   - Every label prefixed `curl_` (reserved-word discipline).
+//   - Module name = PascalCase file basename (`Main` for `main.pdx`).
+//   - No multiline `pub let = "..."` string continuations.
+//   - No `and r11, imm64`; every mask fits in imm32.
+//   - Fingerprint tag sizes: byte-array declarations write the NUL
+//     into the length AND the string body, but the sys_write length
+//     constant is the wire byte count (no NUL). Every literal below
+//     names both explicitly (`_len` sibling constant).
+//
+// SC+ IDs used (matches src/user/syscall_shim.pdx + design/user/
+// syscall-table.md through sysno 115):
+//   1   = sys_write         (fd, buf, count)         -> n | -errno
+//   60  = sys_exit          (status)                 -> never returns
+//   115 = sys_semantic_send (schema, rec_ptr, rec_len) -> 0 | -errno
+
+module Main = structure {
+
+  // -----------------------------------------------------------------
+  // Diagnostic message. Fixed vocabulary at v1.1.0 (real usage string
+  // with grammar + flag hints lands with M1-002 / pdxcurl#2). Wire
+  // byte count in `_len` sibling excludes trailing NUL.
+  // -----------------------------------------------------------------
+  pub let curl_msg_stub         : [u8; 38] = "pdxcurl: v1.1.0 stub, no request run\n\0"
+  pub let curl_msg_stub_len     : u64 = 37
+
+  // -----------------------------------------------------------------
+  // v1.1-B semantic-pipe record buffer + supporting state (pdxcurl#21).
+  //
+  // curl_record_buf holds the marshalled HttpRequestRecord@0.1 (48
+  // bytes). @align(8) so every u64 store is naturally aligned.
+  // .bss-resident (uninit); every field is overwritten at emit time
+  // (v1.1.0's emit is a fixed pattern -- see comments in _start).
+  //
+  // curl_schema_http_req is the schema fingerprint the kernel stores
+  // verbatim into the ring slot's schema u64. Grep-searchable stable
+  // constant; ASCII-mnemonic "HttpReq" + version 0x01.
+  //
+  // curl_hrr_magic is the leading 8 ASCII bytes ("PDXKCURL", little-
+  // endian u64) the emit block writes at record[+0]. Documentation
+  // constant; the emit path uses a movabs to load the same value
+  // inline (avoids a second rip-relative fetch).
+  //
+  // curl_hrr_version_and_flags packs version:u32 in bits [0..31] and
+  // flags:u32 in bits [32..63] so one mov [rN + 8], rM store places
+  // both fields in one instruction (same trick pdxsock uses).
+  // -----------------------------------------------------------------
+  pub let mut curl_record_buf         : [u8; 48] = uninit @align(8)
+  pub let curl_schema_http_req        : u64      = 0x4874747052657101
+  pub let curl_hrr_magic              : u64      = 0x4C5255434B584450
+  pub let curl_hrr_version_and_flags  : u64      = 0x0000000000000001
+
+  // -----------------------------------------------------------------
+  // _start -- pdxcurl entry point. Never returns; every terminal path
+  // ends in sys_exit.
+  //
+  // Register plan (all callee-save-adjacent; leaf syscall-only body,
+  // no `call` cross-module, no push/pop -- rsp % 16 == 0 posture
+  // inherited from ELF process init):
+  //   rax = SYSCALL number + return
+  //   rdi/rsi/rdx = syscall args
+  //   r10 = record base pointer during marshal
+  //
+  // Exit statuses (v1.1.0 subset of §7 taxonomy):
+  //   2 = argv usage refusal (STUB path -- always at v1.1.0)
+  //
+  // Effects: {mem, sysreg} for scratch touches + every SYSCALL.
+  // Caps:    @{fs, sched, cap} -- fs for write, sched for exit,
+  //          cap for the sys_semantic_send emission (cap-ungated on
+  //          the kernel side per src/kernel/core/syscall/handlers/
+  //          sys_semantic_send.pdx at R107-M0-001 but declared for
+  //          shape).
+  // -----------------------------------------------------------------
+  pub let _start : () -> () !{mem, sysreg} @{fs, sched, cap} =
+    fn () -> unsafe {
+      effects: {mem, sysreg},
+      capabilities: {fs, sched, cap},
+      justification: "pdxcurl v1.1.0 STUB entry body + v1.1-B semantic-pipe emission wire (pdxcurl#21). Marshals a fixed HttpRequestRecord@0.1 (48 bytes) into curl_record_buf then emits it via sys_semantic_send (SC+ ID 115, R107-M0-001 #2350). At v1.1.0 every numeric field is zero except the leading `PDXKCURL` magic (8 ASCII bytes) + version = 1 + result_code = INTENT (12). This is a wire-shape witness -- consumers can start parsing HttpRequestRecord@0.1 records against the pdxcurl schema tag (0x4874747052657101, `HttpReq` + version 0x01) BEFORE the M3-003 (pdxcurl#10) real per-request emit lands. The emit runs BEFORE the argv refusal so an operator running `pdxcurl` at v1.1.0 sees one HRR record in the semantic-pipe ring per invocation, followed by the stub diagnostic on fd 2 and exit 2. Ordering is inverted from the design-doc §4 pipeline (INTENT-before-DNS then RESULT-after-response); v1.1.0's single record is not the real INTENT / RESULT pair, and the pair discipline lands with M3-002 (pdxcurl#9). sys_semantic_send's return (0 / -EFAULT / -EINVAL) is intentionally discarded -- v1.1.0 has no session to describe on failure, and a marshalling bug in this file (48-byte record within [1,240] cap, static rip-relative record_ptr never fails user_ptr_ok) is a compile-time question the linker gates. Encoder discipline (per user memory `pdx encoder pitfalls`): no `test rN, rN` (every zero-check is `cmp rN, 0`); no 2-op `imul r, imm`; byte loads use `xor rax, rax; mov_b rax, [ptr]`; module name matches file basename PascalCase (Main); every label prefixed `curl_`; no `and r11, imm64`; every fingerprint string carries a `_len` sibling constant naming the wire byte count (excludes trailing NUL). New encoder patterns exercised by v1.1-B: `mov [rip + label], reg` and `mov reg, [rip + label]` (rip-relative u64 stores/loads, proven at sys_semantic_send.pdx line 214); `mov r64, imm64` movabs for the 8-byte schema constant (proven at sys_semantic_send.pdx line 221 for errno constants). No decimal parse loop (v1.1.0 body has no argv parse); no *10 fold anywhere.",
+      block: {
+        // ---- v1.1-B: marshal HttpRequestRecord@0.1 into curl_record_buf. ----
+        lea r10, [rip + curl_record_buf];
+
+        // [+0]  magic = 0x4C5255434B584450 = "PDXKCURL" (little-endian u64).
+        mov rax, [rip + curl_hrr_magic];
+        mov [r10 + 0], rax;
+
+        // [+8]  version_and_flags = 0x0000000000000001 (version=1, flags=0).
+        mov rax, [rip + curl_hrr_version_and_flags];
+        mov [r10 + 8], rax;
+
+        // [+16] method_and_scheme (u32) + status (u32) = 0 at v1.1.0.
+        xor rax, rax;
+        mov [r10 + 16], rax;
+
+        // [+24] body_bytes (u64) = 0 at v1.1.0.
+        xor rax, rax;
+        mov [r10 + 24], rax;
+
+        // [+32] redirect_count (u32) + header_count (u32) = 0 at v1.1.0.
+        xor rax, rax;
+        mov [r10 + 32], rax;
+
+        // [+40] result_code (u32) = INTENT (12) + reserved (u32) = 0.
+        mov rax, 12;
+        mov [r10 + 40], rax;
+
+        // ---- sys_semantic_send(schema, rec_ptr, rec_len). SC+ ID 115. ----
+        // schema tag in rdi (u64), record pointer in rsi, record length
+        // (48) in rdx. Return in rax (0 or -errno); intentionally
+        // discarded -- v1.1.0 has no session to describe on failure.
+        mov rdi, [rip + curl_schema_http_req];
+        lea rsi, [rip + curl_record_buf];
+        mov rdx, 48;
+        mov rax, 115;
+        syscall;
+
+        // ---- Diagnostic on fd 2 (stderr): "pdxcurl: v1.1.0 stub, ..." ----
+        mov rdi, 2;
+        lea rsi, [rip + curl_msg_stub];
+        mov rdx, 37;                            // curl_msg_stub_len
+        mov rax, 1;                             // sys_write
+        syscall;
+
+        // ---- sys_exit(2). Argv usage refusal per §7. ----
+        mov rdi, 2;
+        mov rax, 60;
+        syscall;
+        hlt;
+      }
+    }
+
+}

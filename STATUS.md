@@ -1,0 +1,55 @@
+# pdxcurl -- status
+
+**Version:** v1.1.0 (unsigned source-tag release, 2026-09-13).
+**Wave:** R100 (paideia-os design/networking/r100-user-tools-plan.md §7 + §13.3).
+**Design doc:** paideia-os design/networking/pdxcurl-design.md.
+
+## Overall status
+
+pdxcurl at v1.1.0 is a **STUB scaffold** with the v1.1-B semantic-pipe
+emission wire landed. It compiles, links, and emits one
+`HttpRequestRecord@0.1` per invocation (result_code=INTENT, other
+fields zero) before refusing argv with exit 2 -- honest witness of the
+wire without a fabricated request. Every real request-path milestone
+(M1-002 argv, M2-001 libpdx-url, M2-002 http_get, M3-001 net_tls_wrap,
+M3-002 audit INTENT/RESULT, M3-003 HttpRequestRecord real fill) is
+deferred to satellite-lib unblocks tracked in the pdxcurl issue list.
+
+## Milestone status
+
+| Milestone | Issue | Status |
+|-----------|-------|--------|
+| M1-001 scaffold + caps.decl                                 | pdxcurl#1  | LANDED (v1.1.0 -- caps.decl, link.ld, tools/build.sh, src/main.pdx STUB, tests/, manifest.pdxproj) |
+| M1-002 argv surface                                         | pdxcurl#2  | DEFERRED (blocked on libpdx-argv scanner Parser wire-in) |
+| M1-003 --dry-run first-runnable                             | pdxcurl#3  | DEFERRED (needs M1-002) |
+| M2-001 libpdx-url integration                               | pdxcurl#4  | DEFERRED (blocked on libpdx-url M1) |
+| M2-002 HTTP-only GET (libpdx-net.http_get)                  | pdxcurl#5  | DEFERRED (blocked on libpdx-net M2) |
+| M2-003 --output FILE                                        | pdxcurl#6  | DEFERRED (needs M2-002) |
+| M2-004 --data / POST                                        | pdxcurl#7  | DEFERRED (needs M2-002) |
+| M3-001 HTTPS path (net_tls_wrap + --trust)                  | pdxcurl#8  | DEFERRED (blocked on libpdx-net M5 + pdxtrust M1) |
+| M3-002 libpdx-audit INTENT/RESULT                           | pdxcurl#9  | DEFERRED (audit_append_leaf landed at libpdx-audit#31; pdxcurl call-site not wired) |
+| M3-003 semantic-pipe HttpRequestRecord@0.1 real fill        | pdxcurl#10 | DEFERRED (needs M3-002 for INTENT/RESULT audit_id) |
+| M3-004 --audit-only                                         | pdxcurl#11 | DEFERRED (needs M3-002) |
+| M3-005 structured error taxonomy                            | pdxcurl#12 | DEFERRED (needs M2/M3) |
+| M4-001 HTTP GET happy-path smoke                            | pdxcurl#13 | DEFERRED (needs M2-002) |
+| **M4-002 HTTPS happy-path smoke witness**                   | **pdxcurl#14** | **LANDED (v1.1.0 -- honest-blockage witness at tests/m4_002_https_smoke.pdx; real body EDIT at libpdx-net M5 unblock)** |
+| **M4-003 failure-matrix smoke witness**                     | **pdxcurl#15** | **LANDED (v1.1.0 -- honest-blockage witness at tests/m4_003_failure_matrix.pdx; three roles r/n/k)** |
+| **M4-004 audit-trail assertion witness**                    | **pdxcurl#16** | **LANDED (v1.1.0 -- honest-blockage witness at tests/m4_004_audit_trail.pdx; row-shape contract documented)** |
+| M4-005 redirect-chain smoke                                 | pdxcurl#17 | DEFERRED (needs M4-002) |
+| M5-001 dual-signed manifest.pdxsig + .pdxdoc                | pdxcurl#18 | DEFERRED (v1.2.0 landing) |
+| M5-002 mirror push                                          | pdxcurl#19 | DEFERRED (needs M5-001) |
+| **v1.1-B semantic-pipe emission wire**                      | **pdxcurl#21** | **LANDED (v1.1.0 -- src/main.pdx marshals + emits HttpRequestRecord@0.1 via sys_semantic_send)** |
+| **v1.1-C release closer + tag v1.1.0**                      | **pdxcurl#22** | **LANDED (v1.1.0 -- manifest.pdxproj version=1.1.0, CHANGELOG [1.1.0] stanza, release/manifest.pdxsig.txt source form, release/RELEASE-1.1.0.md note)** |
+
+## Substrate readiness
+
+| Substrate | Status |
+|-----------|--------|
+| paideia-as >= 0.36.0                    | AVAILABLE (Wave L baseline) |
+| sys_semantic_send (SC+ ID 115)          | AVAILABLE (paideia-os R107-M0-001 #2350) |
+| libpdx-audit audit_append_leaf          | AVAILABLE (libpdx-audit#31; pdxcurl wire pending M3-002) |
+| libpdx-net net_connect / net_resolve    | UNAVAILABLE (blocked on libpdx-net M2/M3/M4) |
+| libpdx-net net_tls_wrap                 | UNAVAILABLE (blocked on libpdx-net M5) |
+| pdxtrust KIND_TLS_TRUST cap mint        | UNAVAILABLE (blocked on pdxtrust M1) |
+| libpdx-url url_parse                    | UNAVAILABLE (blocked on libpdx-url M1) |
+| paideia-os smoke-runner fixture-seq     | UNAVAILABLE (paideia-os monorepo work) |

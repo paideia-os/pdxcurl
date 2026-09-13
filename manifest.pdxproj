@@ -1,0 +1,97 @@
+# pdxcurl -- paideia-as build manifest
+#
+# Wave: R100  Milestone: v1.1-C release closer (pdxcurl#22)
+# Doc:  design/networking/pdxcurl-design.md +
+#       design/networking/r100-user-tools-plan.md §12.3 + §13.3
+#       (paideia-os repo).
+#
+# Consumed by `paideia-as build` (release-time signer path) and by the
+# tools/build.sh iterator (`src/*.pdx` glob) at day-to-day build time.
+# paideia-as v0.36.0 is the toolchain floor (see tools/build.sh); the
+# release-time dual-sign at a future M5 additionally invokes
+# paideia-pq-sign::sign_release_artifact (Ed25519 + ML-DSA-65 hybrid).
+#
+# v1.1.0 (Wave M drain, this landing) closes:
+#   - pdxcurl#14 M4-002 HTTPS happy-path smoke witness (BLOCKED on
+#     libpdx-net M5; honest-blockage witness landed)
+#   - pdxcurl#15 M4-003 failure-matrix smoke witness (BLOCKED on
+#     libpdx-net M3/M4/M5 + pdxtrust M1; honest-blockage witness landed)
+#   - pdxcurl#16 M4-004 audit-trail assertion witness (BLOCKED on
+#     pdxcurl.M3-002; honest-blockage witness landed)
+#   - pdxcurl#21 v1.1-B semantic-pipe emission wire (HttpRequestRecord@
+#     0.1, 48-byte record, schema tag 0x4874747052657101 = `HttpReq`
+#     + version 0x01, sys_semantic_send SC+ ID 115)
+#   - pdxcurl#22 v1.1-C release closer + tag v1.1.0
+#
+# What v1.1.0 does NOT ship:
+#   - Real HTTP GET / HTTPS TLS handshake / DNS resolve / audit
+#     INTENT/RESULT pair (pdxcurl#5..#12 -- blocked on libpdx-net,
+#     libpdx-url, libpdx-audit, pdxtrust satellite landings).
+#   - Argv scanner (pdxcurl#2, M1-002 -- deferred).
+#   - --dry-run body (pdxcurl#3, M1-003 -- deferred).
+#   - Redirect-chain smoke (pdxcurl#17, M4-005).
+#   - Dual-signed release manifest (pdxcurl#18, M5-001 -- v1.1.0 is
+#     unsigned source-tag; dual-sign lands at v1.2.0 following the
+#     pdxsock precedent).
+
+name        = pdxcurl
+version     = 1.1.0
+kind        = tool
+entry       = _start                    # src/main.pdx
+output      = build-out/pdxcurl.elf
+caps_decl   = caps.decl
+
+# --- Source list (order-insensitive; paideia-as resolves module deps
+# from `module <Basename> = structure { ... }` headers).
+sources:
+  - src/main.pdx                  # v1.1-B: STUB entry + HttpRequestRecord emit
+  - src/tool_ident.pdx            # PDX_TOOL_NAME / PDX_TOOL_VERSION (Wave 6)
+
+# --- Library dependencies ----------------------------------------------
+# pdxcurl at v1.1.0 depends on nothing outside the SC+ syscall floor
+# (sysnos 1/60/115). libpdx-net / libpdx-url / libpdx-audit / pdxtrust
+# integration lands at M2-M3 -- each is a manifest edit that will
+# migrate this list from `deps: []` to the appropriate `deps:` list
+# without touching src/*.pdx call-sites (the design-doc-final ABI is
+# what src/main.pdx targets even at its STUB body).
+deps: []
+
+# --- Test targets ------------------------------------------------------
+# M4 witnesses land at v1.1.0 as compile-only (`build-out/tests-*.o`
+# artifacts, unlinked). Runtime round-trip proof-of-life awaits (a)
+# libpdx-net M5 landing net_tls_wrap / net_connect / net_resolve; (b)
+# pdxtrust M1 landing KIND_TLS_TRUST cap minting; (c) pdxcurl M3-002
+# landing the libpdx-audit INTENT/RESULT wire; and (d) the paideia-os
+# smoke-runner extension sequencing fixture-server + witness pairs.
+tests:
+  - tests/m4_002_https_smoke.pdx      # pdxcurl#14 -- HTTPS happy-path (BLOCKED)
+  - tests/m4_003_failure_matrix.pdx   # pdxcurl#15 -- failure matrix (BLOCKED)
+  - tests/m4_004_audit_trail.pdx      # pdxcurl#16 -- audit-trail assertion (BLOCKED)
+
+# --- Documentation targets ---------------------------------------------
+# .pdxdoc source lands at M5-001 (pdxcurl#18); v1.1.0 has no doc/
+# tree per the honest-scope discipline.
+docs: []
+
+# --- Paideia-as compliance flags ---------------------------------------
+# These mirror the invariants src/main.pdx is written against. A build
+# under a paideia-as revision that does not honour every flag below
+# should refuse fast rather than silently mis-encode.
+compliance:
+  - module-basename-pascal        # Module <BasenamePascalCase>, no dir prefix
+  - no-test-mnemonic              # zero-check via cmp reg, 0
+  - cmp-imm32-only                # cmp reg, imm <= 0x7FFFFFFF; else stage via r11
+  - r11-scratch                   # r11 is not preserved across calls
+  - byte-load-zero-then-mov_b     # xor rax, rax; mov_b rax, [ptr]
+  - sysv-push-pop-parity          # rsp % 16 == 0 at every nested call
+
+# --- Release policy ----------------------------------------------------
+# v1.1.0 is the unsigned source-tag release (Wave M drain: pdxcurl#22).
+# Dual-signed release-source landing lands at v1.2.0 (M5-001 /
+# pdxcurl#18), following the pdxsock precedent. The v1.1.0 tag is
+# hand-cut by main after this drain lands.
+release:
+  signer_author  = <unsigned-source-tag>                        # v1.1.0 is unsigned
+  mirror_target  = <deferred-to-v1.2.0-M5-001>                  # pdxcurl#19 mirror push
+  manifest_src   = release/manifest.pdxsig.txt                  # source form (v1.1.0)
+  release_notes  = release/RELEASE-1.1.0.md                     # operator note

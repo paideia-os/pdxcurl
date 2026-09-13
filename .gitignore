@@ -1,0 +1,10 @@
+# build products
+build-out/
+*.o
+*.elf
+*.bin
+
+# editor/OS noise
+*.swp
+*~
+.DS_Store
