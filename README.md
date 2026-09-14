@@ -4,7 +4,10 @@ Improved-curl CLI for PaideiaOS. Capability-native trust (`KIND_TLS_TRUST` caps 
 
 ## Status
 
-**v1.4.0** (unsigned source-tag). CLI surface: `pdxcurl [-o|--output FILE] [-d|--data BODY] [--trust=cap:<n>] [--audit-only] <url>`. Real HTTP-only GET/POST against an IPv4-literal host; `https://` is refused unless `--trust=cap:<n>` is given, in which case the request is wrapped through a WEAK-stub `net_tls_wrap` (plaintext — a real TLS handshake still blocks on `libpdx-net` M5 + `pdxtrust` M1 cap minting). `--audit-only` emits an INTENT audit record and exits `200` without performing any network I/O. See `STATUS.md` for the full per-milestone breakdown.
+**v1.4.1** (documentation-only patch tag over v1.4.0's unsigned
+source-tag; compiled artifact unchanged — adds
+[`release/mirror-push.md`](release/mirror-push.md), the M5-002
+mirror-push runbook, which is **blocked on R32**). CLI surface: `pdxcurl [-o|--output FILE] [-d|--data BODY] [--trust=cap:<n>] [--audit-only] <url>`. Real HTTP-only GET/POST against an IPv4-literal host; `https://` is refused unless `--trust=cap:<n>` is given, in which case the request is wrapped through a WEAK-stub `net_tls_wrap` (plaintext — a real TLS handshake still blocks on `libpdx-net` M5 + `pdxtrust` M1 cap minting). `--audit-only` emits an INTENT audit record and exits `200` without performing any network I/O. See `STATUS.md` for the full per-milestone breakdown.
 
 ## Spec
 

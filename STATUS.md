@@ -1,6 +1,7 @@
 # pdxcurl -- status
 
-**Version:** v1.4.0 (unsigned source-tag release, 2026-09-13; Wave HH drain).
+**Version:** v1.4.1 (documentation-only patch tag, 2026-09-13; M5-002
+mirror-push runbook). Compiled artifact is byte-identical to v1.4.0.
 **Wave:** R100 (paideia-os design/networking/r100-user-tools-plan.md §7 + §13.3).
 **Design doc:** paideia-os design/networking/pdxcurl-design.md.
 
@@ -46,7 +47,7 @@ hand-rolled Phase A scanner (not libpdx-argv) is what recognises
 | **M4-004 audit-trail assertion witness**                    | **pdxcurl#16** | **LANDED (v1.1.0 -- honest-blockage witness at tests/m4_004_audit_trail.pdx; row-shape contract documented)** |
 | **M4-005 redirect-chain smoke**                              | **pdxcurl#17** | **LANDED (v1.4.0 -- tests/curl_redirect_matrix.pdx: local redirect-decision engine asserts 301/302/303 downgrade + 307/308 preserve + 10-hop cap; src/main.pdx itself does not follow redirects yet)** |
 | **M5-001 dual-signed manifest.pdxsig + .pdxdoc**             | **pdxcurl#18** | **LANDED-UNSIGNED (v1.4.0 -- CHANGELOG + README + release/RELEASE-1.4.0.md + release/manifest.pdxsig.txt refreshed; manifest STAYS an unsigned source-form placeholder pending the v0.33 PQ-signing crypto landing)** |
-| M5-002 mirror push                                          | pdxcurl#19 | DEFERRED (needs M5-001) |
+| **M5-002 mirror push**                                      | **pdxcurl#19** | **DOCUMENTED, BLOCKED ON R32 (v1.4.1 -- `release/mirror-push.md` pins the `pkgs.paideia-os/{staging,main}/pdxcurl/$VERSION/` URL convention, the pkg.tar layout, the 11-step push workflow, rollback + escalation. No code: every step from §3.4 onward needs R32's PQ signing substrate + `paideia_root_pk`, and the mirror host itself is not scaffolded. Do NOT mark LANDED until a real push executes)** |
 | **v1.1-B semantic-pipe emission wire**                      | **pdxcurl#21** | **LANDED (v1.1.0 -- src/main.pdx marshals + emits HttpRequestRecord@0.1 via sys_semantic_send)** |
 | **v1.1-C release closer + tag v1.1.0**                      | **pdxcurl#22** | **LANDED (v1.1.0 -- manifest.pdxproj version=1.1.0, CHANGELOG [1.1.0] stanza, release/manifest.pdxsig.txt source form, release/RELEASE-1.1.0.md note)** |
 
@@ -62,3 +63,5 @@ hand-rolled Phase A scanner (not libpdx-argv) is what recognises
 | pdxtrust KIND_TLS_TRUST cap mint        | UNAVAILABLE (blocked on pdxtrust M1) |
 | libpdx-url url_parse                    | UNAVAILABLE (blocked on libpdx-url M1) |
 | paideia-os smoke-runner fixture-seq     | UNAVAILABLE (paideia-os monorepo work) |
+| R32 PQ signing substrate + `paideia_root_pk` | UNAVAILABLE (blocks M5-001's real signatures and every signing/push step of `release/mirror-push.md`) |
+| `pkgs.paideia-os` mirror host + signing runner | UNAVAILABLE (not scaffolded; separate paideia-os infrastructure round. Independent of R32 -- clearing R32 alone does not unblock M5-002) |

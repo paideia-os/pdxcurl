@@ -28,7 +28,73 @@ Version discipline:
              redirect-chain method-preservation + 10-hop-cap smoke
              (pdxcurl#17), release closer (pdxcurl#18 -- manifest
              stays UNSIGNED pending v0.33 PQ-signing crypto).
+  v1.4.1 -- documentation-only patch tag (2026-09-13). M5-002
+             mirror-push runbook (pdxcurl#19). No source, test, or
+             build change: the compiled artifact is byte-identical
+             to v1.4.0, so `manifest.pdxproj` `version`,
+             `release/manifest.pdxsig.txt` `package-version`, and
+             `PDX_TOOL_VERSION` in src/tool_ident.pdx all remain
+             1.4.0 deliberately. The five-way version agreement
+             `release/mirror-push.md` §3.1 requires applies to a
+             real mirror push; v1.4.1 is a docs tag, not a push.
 -->
+
+## [1.4.1] -- 2026-09-13 -- M5-002 mirror-push runbook (documentation-only)
+
+### Added
+
+- **`release/mirror-push.md` (pdxcurl#19, M5-002).** The input
+  contract for publishing a pdxcurl release to the `pkgs.paideia-os`
+  package mirror, written while the release shape is fresh so the
+  first real push is not a schema negotiation against a moving
+  target. Pins:
+  - **Mirror URL convention.** `https://pkgs.paideia-os/staging/pdxcurl/$VERSION/`
+    for the author-signed upload, `https://pkgs.paideia-os/main/pdxcurl/$VERSION/`
+    for the dual-signed publication, `main/index.pdxsig` for the
+    signed index. Three files per published version: `pkg.tar`,
+    `manifest.pdxsig` (byte-identical to the copy inside the tar, so
+    `pkg verify` needs no network), `mirror.entry`.
+  - **"Mirror" is not a git remote.** pdxcurl has exactly one remote
+    (`origin`); this wave defines no second forge. The doc says so
+    explicitly so a future reader does not add one on the strength of
+    the M5-002 issue title.
+  - **`pkg.tar` layout**, source-first per `libpdx-argv`'s precedent
+    (`src/*.pdx` lowered on the target; `tests/` and `build-out/`
+    not shipped), lexicographically ordered for a reproducible hash.
+  - **Hash discipline: BLAKE3-256**, matching this repo's existing
+    `<BLAKE3-*>` manifest slots -- with the three-way ecosystem
+    divergence recorded rather than silently resolved (`shell`
+    specifies sha3-256, `libpdx-argv` sha256, `rm` blake3-256 for
+    the same index).
+  - **The push workflow**, §3.1 pre-flight checklist through §3.11
+    close-out: freeze tree -> build -> populate manifest hashes ->
+    author-sign -> pack -> tag + push origin -> push staging ->
+    runner promotion -> verify from a clean machine -> STATUS
+    flip. Genericized on `$VERSION` from the start, explicitly to
+    avoid `libpdx-elevate`'s hardcoded-`1.0.0` drift bug.
+    Origin push always precedes mirror push, so the mirror never
+    attests to a commit nobody can fetch.
+  - **Rollback + escalation.** The mirror is append-only for signed
+    releases; version numbers are immutable; withdrawal removes
+    availability, not validity.
+- **`STATUS.md`** M5-002 row flipped from `DEFERRED (needs M5-001)`
+  to `DOCUMENTED, BLOCKED ON R32`, plus two new substrate-readiness
+  rows (R32 signing substrate; the mirror host itself).
+
+### Blocked
+
+- **M5-002 cannot execute: BLOCKED ON R32.** Every step from
+  `release/mirror-push.md` §3.4 onward depends on R32's
+  post-quantum signing substrate and the `paideia_root_pk` root key
+  this workflow signs and verifies against. This repo does not scope
+  R32 and states no date for it -- it is recorded only as the open
+  prerequisite. Secondary blockers, named so R32 is not mistaken for
+  the only one: the `pkgs.paideia-os` mirror host and signing runner
+  are not scaffolded, `release/manifest.pdxsig.txt` is still an
+  unsigned source-form placeholder (pdxcurl#18, LANDED-UNSIGNED),
+  `doc/pdxcurl.pdxdoc` is unwritten, and all four dependency repos
+  (`libpdx-url`, `libpdx-net`, `libpdx-audit`, `pdxtrust`) have yet
+  to ship to the mirror.
 
 ## [1.4.0] -- 2026-09-13 -- Wave HH TLS gate + audit-only + smoke matrix (unsigned source-tag)
 
