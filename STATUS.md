@@ -1,28 +1,37 @@
 # pdxcurl -- status
 
-**Version:** v1.4.1 (documentation-only patch tag, 2026-09-13; M5-002
-mirror-push runbook). Compiled artifact is byte-identical to v1.4.0.
+**Version:** v1.5.0 (Wave mu-02, paideia-os/pdxcurl#12 -- real TLS
+handshake attempt + record-layer wrap).
 **Wave:** R100 (paideia-os design/networking/r100-user-tools-plan.md §7 + §13.3).
 **Design doc:** paideia-os design/networking/pdxcurl-design.md.
 
 ## Overall status
 
-pdxcurl at v1.4.0 has a REAL HTTP-only request/response driver
-(landed at v1.3.0, Wave CC) plus, at this Wave HH landing: an
-https:// path gated behind `--trust=cap:<n>` and a WEAK-stub
-`net_tls_wrap` call (`src/tls_wire.pdx`, pdxcurl#8 -- the request
-still travels in PLAINTEXT since the stub always succeeds without a
-real handshake); an `--audit-only` INTENT-only terminal path that
-performs no network I/O and exits a distinct `200`
-(`EXIT_SUCCESS_AUDIT_ONLY`, pdxcurl#11); and two new self-contained
-smoke witnesses (`tests/curl_get_smoke.pdx`, pdxcurl#13; `tests/
-curl_redirect_matrix.pdx`, pdxcurl#17). A real TLS handshake still
-blocks on libpdx-net M5 + pdxtrust M1 cap minting; DNS-name hosts,
-`-H`/`--header`, `-X` method override, and a real redirect-follow
-loop remain deferred. The M1-002 argv parser BODY is still deferred
-to libpdx-argv M1 (or a hand-rolled scanner), decoupled from the
-flag-name namespace which landed at v1.2.0 -- src/main.pdx's own
-hand-rolled Phase A scanner (not libpdx-argv) is what recognises
+pdxcurl at v1.5.0 has a REAL HTTP-only request/response driver
+(landed at v1.3.0, Wave CC) plus an https:// path gated behind
+`--trust=cap:<n>` whose `net_tls_wrap` call (`src/tls_wire.pdx`) now
+sends a REAL TLS-record-shaped ClientHello and REALLY waits for (and
+inspects) a ServerHello-shaped response -- `curl_tls_wrap_fail` is
+reachable for the first time. The HTTP request/response bytes
+themselves now travel wrapped in a real TLS record-layer header
+(`tls_wire_record_send`/`tls_wire_record_recv`) when `curl_url_scheme
+== 1`. No encryption exists anywhere in this landing: no crypto
+intrinsics are linked in the paideia-as stdlib yet (blocked on
+R100-PREP-005) and libpdx-net's own `net_tls_wrap` (v0.5.0, no v0.6.0
+tag published as of this wave) is itself still scaffold-only, so this
+is the maximum honest amount of real network-shaped work achievable
+today -- real framing, real blocking reads, no cipher. An
+`--audit-only` INTENT-only terminal path that performs no network I/O
+and exits a distinct `200` (`EXIT_SUCCESS_AUDIT_ONLY`, pdxcurl#11);
+two self-contained smoke witnesses (`tests/curl_get_smoke.pdx`,
+pdxcurl#13; `tests/curl_redirect_matrix.pdx`, pdxcurl#17). A real
+encrypted TLS handshake still blocks on paideia-as crypto intrinsics
+landing (R100-PREP-005) + libpdx-net M5 + pdxtrust M1 cap minting;
+DNS-name hosts, `-H`/`--header`, `-X` method override, and a real
+redirect-follow loop remain deferred. The M1-002 argv parser BODY is
+still deferred to libpdx-argv M1 (or a hand-rolled scanner), decoupled
+from the flag-name namespace which landed at v1.2.0 -- src/main.pdx's
+own hand-rolled Phase A scanner (not libpdx-argv) is what recognises
 `--trust=`/`--audit-only` at this landing.
 
 ## Milestone status

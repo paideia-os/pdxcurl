@@ -39,6 +39,49 @@ Version discipline:
              real mirror push; v1.4.1 is a docs tag, not a push.
 -->
 
+## [1.5.0] -- 2026-09-14 -- Wave mu-02: real TLS handshake attempt + record-layer wrap (pdxcurl#12)
+
+### Changed
+
+- **`src/tls_wire.pdx`: `tls_wire_net_tls_wrap` upgraded from an
+  unconditional-success passthrough to a REAL attempt.** Sends a real
+  14-byte TLS-record-shaped ClientHello (5-byte record header + a
+  9-byte minimal ClientHello-shaped handshake body) over the connected
+  socket, then REALLY `sys_recv`s and inspects the peer's response
+  (requiring content_type == 0x16 Handshake) before reporting success.
+  `main.pdx`'s `curl_tls_wrap_fail` branch (RC_TLS_HANDSHAKE_FAILED=4 /
+  EXIT_TLS_HANDSHAKE_FAILED=9) is reachable for the first time in this
+  repo's history. No key material is derived (no crypto intrinsics
+  exist in the paideia-as stdlib yet, and libpdx-net's own
+  `net_tls_wrap` is itself still scaffold-only at v0.5.0) -- a success
+  return means "the peer spoke back something TLS-record-shaped", not
+  "an encrypted channel exists".
+
+### Added
+
+- **`tls_wire_record_send(fd, ptr, len)` / `tls_wire_record_recv(fd,
+  out_ptr, out_cap)`.** A real TLS record-layer WRAPPER around the
+  HTTP request/response bytes: a 5-byte header (content_type=0x17
+  Application Data, version=0x0303, BE16 length) is sent before the
+  payload and parsed-and-stripped on receive. The payload itself
+  remains PLAINTEXT (no cipher exists to run). `src/main.pdx`'s Phase
+  C.3/D now call these two functions instead of the bare
+  `sys_send`/`sys_recv` pair whenever `curl_url_scheme == 1`
+  (https://); the http:// path is byte-for-byte unchanged.
+
+### Known gaps (unchanged or newly documented)
+
+- Still no key derivation, no certificate/signature verification, no
+  cipher -- blocked on paideia-as crypto intrinsics (R100-PREP-005)
+  landing in the stdlib, which in turn blocks libpdx-net's own
+  `net_tls_wrap` from growing past its v0.5.0 ClientHello-only
+  scaffold.
+- `tls_wire_net_tls_wrap`/`tls_wire_record_send`/`tls_wire_record_recv`
+  all use single-shot `sys_recv`/`sys_send` calls; a TCP byte stream
+  can in principle split a header or payload across multiple reads --
+  not handled at this landing (documented known gap, same class as
+  the pre-existing single 4 KiB HTTP-response `sys_recv`).
+
 ## [1.4.1] -- 2026-09-13 -- M5-002 mirror-push runbook (documentation-only)
 
 ### Added

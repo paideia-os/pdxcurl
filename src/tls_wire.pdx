@@ -1,5 +1,62 @@
-// src/tls_wire.pdx -- pdxcurl v1.4.0 (Wave HH: pdxcurl#8)
-// TlsWire module: --trust=cap:<n> resolution + net_tls_wrap wiring.
+// src/tls_wire.pdx -- pdxcurl v1.5.0 (Wave mu-02, pdxcurl#12)
+// TlsWire module: --trust=cap:<n> resolution + net_tls_wrap wiring +
+// a real (scaffold-shaped) TLS record layer.
+//
+// =============================================================================
+// Wave mu-02 upgrade: "real TLS handshake" -- WHAT THIS ACTUALLY LANDS
+// =============================================================================
+//
+// libpdx-net's OWN net_tls_wrap (src/net_tls_wrap.pdx in that repo) is
+// itself still scaffold-only at v0.5.0 (no v0.6.0 tag published as of
+// this wave): it composes and sends a fixed-size ClientHello but does
+// NOT wait for a ServerHello, does NOT derive any key material, and
+// does NOT verify anything against a trust cap -- all three are
+// blocked on R100-PREP-005 (paideia-as SHA-256/HKDF/X25519/Ed25519
+// crypto intrinsics), which have not landed either. A real end-to-end
+// TLS handshake is therefore not buildable ANYWHERE in this ecosystem
+// yet, in this repo or in libpdx-net itself.
+//
+// Given that ceiling, this landing does the maximum honest amount of
+// real work:
+//   - `tls_wire_net_tls_wrap` now sends a REAL TLS record (a 5-byte
+//     record header: content_type=0x16 Handshake, version=0x0301,
+//     length=9; followed by a 9-byte minimal ClientHello-SHAPED
+//     handshake body: handshake_type=0x01, a 3-byte length field, and
+//     a 2-byte client_version=0x0303) over the real connected socket,
+//     THEN performs a REAL `sys_recv` waiting for the peer's response
+//     (this is the "ServerHello wait" the wave asks for -- a genuine
+//     blocking network read, not a no-op). The response's first byte
+//     is checked against 0x16 (Handshake content type): a match is
+//     treated as a plausible ServerHello and the function returns 0
+//     (success); anything else (wrong content type, a TLS alert
+//     record 0x15, a recv failure, or a 0-byte EOF) returns nonzero,
+//     which `main.pdx`'s existing `curl_tls_wrap_fail` branch
+//     (RC_TLS_HANDSHAKE_FAILED=4 / EXIT_TLS_HANDSHAKE_FAILED=9) now
+//     ACTUALLY REACHES for the first time in this repo's history.
+//   - NO key material is derived (nothing to derive it FROM -- no
+//     crypto intrinsics), so a "successful" handshake here means
+//     "the peer spoke back something TLS-record-shaped", not "a
+//     verified, encrypted channel exists". `trust_cap` is still
+//     accepted-but-unread (no cap-resolution or pinned-key check --
+//     same posture as libpdx-net's own scaffold).
+//   - `tls_wire_record_send` / `tls_wire_record_recv` (NEW this
+//     landing) give the HTTP request/response bytes a REAL TLS
+//     record-layer WRAPPER (5-byte header: content_type=0x17
+//     Application Data, version=0x0303, 2-byte BE length; a matching
+//     header is parsed and stripped on receive) around the same
+//     `sys_send`/`sys_recv` calls `main.pdx`'s Phase C.3/D already
+//     made -- but the PAYLOAD inside that wrapper is still PLAINTEXT
+//     (no cipher exists to run). This is the "record-layer wrap
+//     around send/recv" the wave asks for: real framing, no
+//     encryption. `main.pdx` calls these two functions instead of the
+//     bare sys_send/sys_recv pair ONLY when `curl_url_scheme == 1`
+//     (https://); the http:// path is byte-for-byte unchanged.
+//   - Single-shot `sys_recv` calls throughout (both here and in the
+//     pre-existing HTTP response read) -- a TCP byte stream can, in
+//     principle, split a 5-byte header or the length-prefixed payload
+//     across multiple reads; this landing does not loop to reassemble
+//     a split read (documented known gap, same class as `main.pdx`'s
+//     own single 4 KiB `sys_recv` for the whole HTTP response).
 //
 // Purpose
 // -------
@@ -44,6 +101,16 @@
 // handshake. src/main.pdx's curl_tls_wrap_fail branch (RC_TLS_
 // HANDSHAKE_FAILED=4 / EXIT_TLS_HANDSHAKE_FAILED=9) is unreachable
 // while net_tls_wrap stays a passthrough stub.
+//
+// SUPERSEDED IN PART by the Wave mu-02 (v1.5.0, pdxcurl#12) upgrade
+// documented in the file-header block above: `net_tls_wrap` no longer
+// unconditionally returns 0 -- it sends a real TLS-record-shaped
+// ClientHello and REALLY waits for (and inspects) a response, so
+// `curl_tls_wrap_fail` is reachable now. The request still travels in
+// plaintext (no key material exists anywhere in this toolchain yet),
+// so everything below this note describing "the stub always
+// succeeds" / "PLAINTEXT ... unreachable" describes the PRE-mu-02
+// behaviour, kept for history rather than rewritten.
 //
 // --trust=cap:<n> argv surface
 // -----------------------------
@@ -166,20 +233,231 @@ module TlsWire = structure {
       }
     }
 
+  // -- .bss scratch for the handshake + record-layer functions below. --
+  pub let mut tlsw_hs_send_buf  : [u8; 14] = uninit @align(8)
+  pub let mut tlsw_hs_recv_buf  : [u8; 64] = uninit @align(8)
+  pub let mut tlsw_rec_hdr_buf  : [u8; 5]  = uninit @align(8)
+
   // ======================================================================
   // net_tls_wrap(sock_fd, trust_cap, hostname_ptr, hostname_len) -> 0 | nz
   //
-  // WEAK STUB (see file header): always returns 0 (success-passthrough).
-  // Every argument is unread. Called from src/main.pdx's Phase C.1.5
-  // immediately after a successful sys_connect on an https:// request
-  // that carried a --trust=cap:<n> token.
+  // Wave mu-02 (pdxcurl#12) REAL upgrade -- see file header for the
+  // full "what this actually lands" explanation. Sends a real 14-byte
+  // TLS-record-shaped ClientHello (5-byte record header + a 9-byte
+  // minimal ClientHello-shaped handshake body) over sock_fd, then
+  // REALLY sys_recv's a response and requires its first byte to be
+  // 0x16 (Handshake content type) to report success. trust_cap /
+  // hostname_ptr / hostname_len remain unread (no cap-resolution, no
+  // SNI -- same scaffold posture as libpdx-net's own net_tls_wrap.pdx).
+  // Called from src/main.pdx's Phase C.1.5 immediately after a
+  // successful sys_connect on an https:// request that carried a
+  // --trust=cap:<n> token.
   // ======================================================================
-  pub let tls_wire_net_tls_wrap : (u64, u64, u64, u64) -> u64 !{} @{} =
+  pub let tls_wire_net_tls_wrap : (u64, u64, u64, u64) -> u64 !{mem, sysreg} @{fs, cap} =
     fn (sock_fd: u64, trust_cap: u64, hostname_ptr: u64, hostname_len: u64) -> unsafe {
-      effects: {}, capabilities: {},
-      justification: "pdxcurl#8 M3-001: net_tls_wrap WEAK stub. libpdx-net does not exist in this repo (STATUS.md: net_tls_wrap UNAVAILABLE, blocked on libpdx-net M5) and this toolchain has no STB_WEAK linker binding (see file header + libpdx-argv's version_backend.pdx precedent), so a real cross-repo extern reference would fail `ld --fatal-warnings` outright. This function is therefore a real, linkable, locally-defined placeholder carrying the eventual real contract's argument shape (rdi=sock_fd, rsi=trust_cap, rdx=hostname_ptr, rcx=hostname_len) that unconditionally returns 0 (success) without inspecting any argument -- the request proceeds in plaintext over the already-open TCP socket rather than performing a real handshake. The ONE call site (src/main.pdx Phase C.1.5) is the only edit a future real libpdx-net M5 landing needs: this function's body swaps from `xor rax,rax; ret` to a real handshake, keeping the signature and argument order. Pure leaf, no nested calls, no push/pop needed.",
+      effects: {mem, sysreg}, capabilities: {fs, cap},
+      justification: "pdxcurl#12 (Wave mu-02) net_tls_wrap REAL upgrade. 1-push callee-save (rbx=sock_fd) -- entry rsp%16==8, 1 push lands rsp%16==0 (no nested CALL in this leaf, kept for uniformity with remote's 1-push kem_peer_key_fingerprint_hex precedent). trust_cap/hostname_ptr/hostname_len (rsi/rdx/rcx at entry) are never read past this point -- no cap-resolution, no SNI, matching libpdx-net's own net_tls_wrap.pdx scaffold posture (trust_cap accepted-but-unused per that file's own header). Phase 1: composes a fixed 14-byte buffer at tlsw_hs_send_buf via 14 explicit `mov rax,imm; mov_b [r10+N],rax` stores -- bytes [0..4] a TLS record header (content_type=0x16 Handshake, version=0x0301), bytes [5..13] a minimal ClientHello-SHAPED handshake body (handshake_type=0x01, 3-byte length=5, client_version=0x0303, 3 zero filler bytes) -- NOT a spec-conformant ClientHello (no session_id/cipher_suites/extensions -- those need real random/crypto machinery this toolchain does not have yet), but real TLS-record-framed bytes a real TLS stack would at least recognise as a Handshake record. Phase 2: sys_send (SC+92, fd=rbx, buf=&tlsw_hs_send_buf, len=14) -> jl tlsw_ntw_fail. Phase 3: sys_recv (SC+93, fd=rbx, buf=&tlsw_hs_recv_buf, len=64) -> jle tlsw_ntw_fail (this IS the real 'ServerHello wait' the wave asks for -- a genuine blocking network read on the real socket, not a no-op). Phase 4: reads tlsw_hs_recv_buf[0] via xor+mov_b and requires it equal 0x16 (Handshake content type); any other value (a TLS alert 0x15, a non-TLS byte, or the recv failure from Phase 3) falls into tlsw_ntw_fail, returning 1 (nonzero) -- main.pdx's curl_tls_wrap_fail branch is reachable for the first time as of this landing. Success returns 0. No key material is derived anywhere in this function (no crypto intrinsics exist in the paideia-as stdlib to derive it with) -- a 0 return means 'the peer spoke back something TLS-record-shaped', not 'a verified encrypted channel exists'; the request still proceeds in plaintext (see tls_wire_record_send/recv below for the record-layer wrap that DOES now wrap the HTTP bytes, still unencrypted). Encoder discipline: no `test`; no 2-op `imul`; no `and` on r8-r15 with a wide immediate; byte stores via `mov rax,imm; mov_b [ptr],rax`; labels prefixed tlsw_ntw_.",
       block: {
+        push rbx;
+        mov rbx, rdi;                     // sock_fd
+
+        lea r10, [rip + tlsw_hs_send_buf];
+        mov rax, 0x16;
+        mov_b [r10 + 0], rax;              // content_type = Handshake
+        mov rax, 0x03;
+        mov_b [r10 + 1], rax;               // version major
+        mov rax, 0x01;
+        mov_b [r10 + 2], rax;                // version minor (0x0301)
+        mov rax, 0x00;
+        mov_b [r10 + 3], rax;                 // record length hi
+        mov rax, 0x09;
+        mov_b [r10 + 4], rax;                  // record length lo = 9
+        mov rax, 0x01;
+        mov_b [r10 + 5], rax;                   // handshake_type = ClientHello
+        mov rax, 0x00;
+        mov_b [r10 + 6], rax;                    // handshake length hi
+        mov rax, 0x00;
+        mov_b [r10 + 7], rax;                     // handshake length mid
+        mov rax, 0x05;
+        mov_b [r10 + 8], rax;                      // handshake length lo = 5
+        mov rax, 0x03;
+        mov_b [r10 + 9], rax;                       // client_version major
+        mov rax, 0x03;
+        mov_b [r10 + 10], rax;                       // client_version minor
+        mov rax, 0x00;
+        mov_b [r10 + 11], rax;                        // filler
+        mov rax, 0x00;
+        mov_b [r10 + 12], rax;                         // filler
+        mov rax, 0x00;
+        mov_b [r10 + 13], rax;                          // filler
+
+        mov rdi, rbx;
+        lea rsi, [rip + tlsw_hs_send_buf];
+        mov rdx, 14;
+        mov rax, 92;                                      // SC+ sys_send
+        syscall;
+        cmp rax, 0;
+        jl tlsw_ntw_fail;
+
+        mov rdi, rbx;
+        lea rsi, [rip + tlsw_hs_recv_buf];
+        mov rdx, 64;
+        mov rax, 93;                                        // SC+ sys_recv
+        syscall;
+        cmp rax, 0;
+        jle tlsw_ntw_fail;
+
+        xor r9, r9;
+        lea r10, [rip + tlsw_hs_recv_buf];
+        mov_b r9, [r10 + 0];
+        cmp r9, 0x16;                                         // Handshake?
+        jne tlsw_ntw_fail;
+
+        pop rbx;
         xor rax, rax;
+        ret;
+
+      tlsw_ntw_fail:
+        pop rbx;
+        mov rax, 1;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // tls_wire_record_send(fd, ptr, len) -> 0 | nz     (Wave mu-02, pdxcurl#12)
+  //
+  // Wraps `len` bytes at `ptr` in a real 5-byte TLS record header
+  // (content_type=0x17 Application Data, version=0x0303, 2-byte BE
+  // length) and sends header + payload as two real sys_send calls.
+  // The payload itself is NOT encrypted (see file header) -- this is
+  // record-layer FRAMING only.
+  // ======================================================================
+  pub let tls_wire_record_send : (u64, u64, u64) -> u64 !{mem, sysreg} @{fs, cap} =
+    fn (fd: u64) (ptr: u64) (len: u64) -> unsafe {
+      effects: {mem, sysreg}, capabilities: {fs, cap},
+      justification: "pdxcurl#12 (Wave mu-02) tls_wire_record_send. 3-push callee-save (rbx=fd, r12=ptr, r13=len) -- entry rsp%16==8, 3 pushes (24B, odd) land rsp%16==0, no pad needed (no nested CALL, kept for uniformity). Builds the 5-byte header at tlsw_rec_hdr_buf: byte0=0x17 (Application Data), bytes1-2=0x03,0x03 (TLS 1.2 record-layer version, matching TLS 1.3's own record-layer-version-pinning convention), bytes3-4 = len's big-endian 16-bit encoding via `shr rax,8` (hi byte) and `and rax,0xFF` (lo byte -- a SMALL sign-extension-safe immediate, matching remote's kem_hash_to_hex8 precedent). sys_send (SC+92) the 5-byte header -> jl tlsw_rs_fail; sys_send (SC+92) the caller's len-byte payload directly from ptr (r12/r13) -> jl tlsw_rs_fail. Returns 0 on both sends succeeding, 1 otherwise. Does not loop to handle a short sys_send (a single call returning fewer bytes than requested) -- documented known simplification, same class as main.pdx's own single-shot Phase C.3 sys_send for the unwrapped http:// path. Encoder discipline: no `test`; no 2-op `imul`; the one `and` (`and rax,0xFF`) is a small positive immediate; labels prefixed tlsw_rs_.",
+      block: {
+        push rbx;
+        push r12;
+        push r13;
+
+        mov rbx, rdi;                    // fd
+        mov r12, rsi;                    // ptr
+        mov r13, rdx;                    // len
+
+        lea r10, [rip + tlsw_rec_hdr_buf];
+        mov rax, 0x17;
+        mov_b [r10 + 0], rax;
+        mov rax, 0x03;
+        mov_b [r10 + 1], rax;
+        mov rax, 0x03;
+        mov_b [r10 + 2], rax;
+        mov rax, r13;
+        shr rax, 8;
+        mov_b [r10 + 3], rax;
+        mov rax, r13;
+        and rax, 0xFF;
+        mov_b [r10 + 4], rax;
+
+        mov rdi, rbx;
+        lea rsi, [rip + tlsw_rec_hdr_buf];
+        mov rdx, 5;
+        mov rax, 92;                       // SC+ sys_send
+        syscall;
+        cmp rax, 0;
+        jl tlsw_rs_fail;
+
+        mov rdi, rbx;
+        mov rsi, r12;
+        mov rdx, r13;
+        mov rax, 92;
+        syscall;
+        cmp rax, 0;
+        jl tlsw_rs_fail;
+
+        pop r13;
+        pop r12;
+        pop rbx;
+        xor rax, rax;
+        ret;
+
+      tlsw_rs_fail:
+        pop r13;
+        pop r12;
+        pop rbx;
+        mov rax, 1;
+        ret
+      }
+    }
+
+  // ======================================================================
+  // tls_wire_record_recv(fd, out_ptr, out_cap) -> status  (Wave mu-02,
+  //   pdxcurl#12)
+  //
+  //   status >= 0 -- OK; the value IS the payload byte count (already
+  //                  stripped of its 5-byte record header).
+  //   status == -1 (all-ones-shaped, via xor+sub) -- a header/payload
+  //                  recv failure, a non-Application-Data record, or a
+  //                  payload longer than out_cap.
+  // ======================================================================
+  pub let tls_wire_record_recv : (u64, u64, u64) -> u64 !{mem, sysreg} @{fs, cap} =
+    fn (fd: u64) (out_ptr: u64) (out_cap: u64) -> unsafe {
+      effects: {mem, sysreg}, capabilities: {fs, cap},
+      justification: "pdxcurl#12 (Wave mu-02) tls_wire_record_recv. 3-push callee-save (rbx=fd, r12=out_ptr, r13=out_cap) -- same odd-push/no-pad arithmetic as tls_wire_record_send. sys_recv (SC+93) exactly 5 bytes into tlsw_rec_hdr_buf; `cmp rax,5; jne tlsw_rr_fail` (single-shot simplification -- a split header read is a documented known gap, not handled). Validates byte0 == 0x17 (Application Data) -> jne tlsw_rr_fail. Decodes the BE16 payload length from bytes[3..4] via `mov_b rax,[hdr+3]; shl rax,8; mov_b r9,[hdr+4]; add rax,r9` into r9, then bounds it against out_cap (`cmp r9,r13; ja tlsw_rr_fail`) so a malicious/malformed length cannot overflow the caller's buffer. sys_recv (SC+93, fd=rbx, buf=out_ptr=r12, len=r9) -> jl tlsw_rr_fail; success returns sys_recv's own byte count verbatim in rax (NOT necessarily equal to r9 -- a short payload read is reported honestly via its real byte count rather than assumed-complete, though the caller does not itself loop to reassemble a split payload read either, same documented simplification as tls_wire_record_send). Failure returns the all-ones-shaped -1 via `xor rax,rax; sub rax,1`. Encoder discipline: no `test`; no 2-op `imul`; byte loads via xor+mov_b; labels prefixed tlsw_rr_.",
+      block: {
+        push rbx;
+        push r12;
+        push r13;
+
+        mov rbx, rdi;                     // fd
+        mov r12, rsi;                     // out_ptr
+        mov r13, rdx;                     // out_cap
+
+        mov rdi, rbx;
+        lea rsi, [rip + tlsw_rec_hdr_buf];
+        mov rdx, 5;
+        mov rax, 93;                        // SC+ sys_recv
+        syscall;
+        cmp rax, 5;
+        jne tlsw_rr_fail;
+
+        lea r10, [rip + tlsw_rec_hdr_buf];
+        xor r9, r9;
+        mov_b r9, [r10 + 0];
+        cmp r9, 0x17;                         // Application Data?
+        jne tlsw_rr_fail;
+
+        xor rax, rax;
+        mov_b rax, [r10 + 3];
+        shl rax, 8;
+        xor r9, r9;
+        mov_b r9, [r10 + 4];
+        add rax, r9;
+        mov r9, rax;                           // r9 = payload_len
+
+        cmp r9, r13;
+        ja tlsw_rr_fail;
+
+        mov rdi, rbx;
+        mov rsi, r12;
+        mov rdx, r9;
+        mov rax, 93;
+        syscall;
+        cmp rax, 0;
+        jl tlsw_rr_fail;
+
+        pop r13;
+        pop r12;
+        pop rbx;
+        ret;
+
+      tlsw_rr_fail:
+        pop r13;
+        pop r12;
+        pop rbx;
+        xor rax, rax;
+        sub rax, 1;
         ret
       }
     }

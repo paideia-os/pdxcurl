@@ -125,7 +125,7 @@
 #   - Mirror push (pdxcurl#19, M5-002).
 
 name        = pdxcurl
-version     = 1.4.0
+version     = 1.5.0
 kind        = tool
 entry       = _start                    # src/main.pdx
 output      = build-out/pdxcurl.elf

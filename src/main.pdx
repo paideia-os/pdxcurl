@@ -1099,9 +1099,18 @@ module Main = structure {
 
       curl_req_ready:
         // ============================================================
-        // Phase C.3: sys_send. Socket fd re-read from .bss because the
-        // request-assembly block above lea'd r15 into curl_argv_slots.
+        // Phase C.3: send the request. Wave mu-02 (pdxcurl#12): an
+        // https:// request (curl_url_scheme == 1) routes through
+        // TlsWire's record-layer wrapper (tls_wire_record_send) so the
+        // bytes travel inside a real TLS record header; an http://
+        // request keeps the original bare sys_send unchanged. Socket
+        // fd re-read from .bss because the request-assembly block
+        // above lea'd r15 into curl_argv_slots.
         // ============================================================
+        mov r10, [rip + curl_url_scheme];
+        cmp r10, 1;
+        je curl_send_via_tls;
+
         mov rdi, [rip + curl_sock_fd_slot];
         lea rsi, [rip + curl_req_buf];
         mov rdx, r12;                              // req_len
@@ -1109,10 +1118,27 @@ module Main = structure {
         syscall;
         cmp rax, 0;
         jl curl_send_fail;
+        jmp curl_send_done;
 
+      curl_send_via_tls:
+        mov rdi, [rip + curl_sock_fd_slot];
+        lea rsi, [rip + curl_req_buf];
+        mov rdx, r12;                              // req_len
+        call tls_wire_record_send;
+        cmp rax, 0;
+        jne curl_send_fail;
+
+      curl_send_done:
         // ============================================================
-        // Phase D: sys_recv into curl_resp_buf (single 4 KiB call).
+        // Phase D: receive the response. https:// routes through
+        // tls_wire_record_recv (strips the real TLS record header,
+        // returns the plaintext payload byte count); http:// keeps the
+        // original single 4 KiB sys_recv into curl_resp_buf.
         // ============================================================
+        mov r10, [rip + curl_url_scheme];
+        cmp r10, 1;
+        je curl_recv_via_tls;
+
         mov rdi, [rip + curl_sock_fd_slot];
         lea rsi, [rip + curl_resp_buf];
         mov rdx, 4096;
@@ -1121,6 +1147,20 @@ module Main = structure {
         cmp rax, 0;
         jl curl_recv_fail;
         mov r12, rax;                              // r12 = bytes_recv'd
+        jmp curl_recv_done;
+
+      curl_recv_via_tls:
+        mov rdi, [rip + curl_sock_fd_slot];
+        lea rsi, [rip + curl_resp_buf];
+        mov rdx, 4096;
+        call tls_wire_record_recv;
+        xor r9, r9;
+        sub r9, 1;                                  // r9 = -1 sentinel
+        cmp rax, r9;
+        je curl_recv_fail;
+        mov r12, rax;                               // r12 = bytes_recv'd (payload only)
+
+      curl_recv_done:
 
         // Guard: need at least "HTTP/1.X SSS\r\n\r\n" (~20 bytes).
         cmp r12, 20;
